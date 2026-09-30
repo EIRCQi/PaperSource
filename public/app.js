@@ -2,7 +2,7 @@ const $=id=>document.getElementById(id);
 const token=document.querySelector('meta[name="app-token"]').content;
 const labels={all:'全部文献',favorite:'星标收藏',unread:'待阅读',reading:'阅读中',done:'已读完',trash:'回收站',tag:'标签分类'};
 const states={unread:'待阅读',reading:'阅读中',done:'已读完'};
-let papers=[],view='all',tag='',selected=null,dirty=false,importing=false,saving=false;
+let papers=[],view='all',tag='',selected=null,dirty=false,importing=false,saving=false,backingUp=false;
 let page=1,stopImport=false,draftPrefix='',draftWarning=false;
 const PAGE_SIZE=50;
 const searchIndex=new Map();
@@ -48,7 +48,7 @@ function renderDetail(){
   let editRevision=p.revision||0;
   dirty=false;
   const pdf=`/api/papers/${p.id}/file?token=${token}`;
-  $('detail').innerHTML=`<div class="detail-head"><span>文献详情</span><a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div><form id="edit"><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div><label>阅读笔记<textarea name="notes" rows="6" maxlength="100000" placeholder="研究问题、主要结论，以及你的思考…">${esc(p.notes)}</textarea></label><div class="save-row"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState">已保存</span><button type="button" id="reloadDetail">重新载入</button><button class="subtle" id="trash" type="button">${p.trashed?'恢复文献':'移入回收站'}</button></div></form><details class="preview"><summary>展开 PDF 预览</summary><iframe title="PDF 文献预览" data-src="${pdf}"></iframe></details><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
+  $('detail').innerHTML=`<div class="detail-head"><span>文献详情</span><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div><form id="edit"><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div><label>阅读笔记<textarea name="notes" rows="6" maxlength="100000" placeholder="研究问题、主要结论，以及你的思考…">${esc(p.notes)}</textarea></label><div class="save-row"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState">已保存</span><button type="button" id="reloadDetail">重新载入</button><button class="subtle" id="trash" type="button">${p.trashed?'恢复文献':'移入回收站'}</button></div></form><details class="preview"><summary>展开 PDF 预览</summary><iframe title="PDF 文献预览" data-src="${pdf}"></iframe></details><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
   const form=$('edit');
   const draft=readDraft(p.id);
   if(draft&&draft.values&&Number.isSafeInteger(draft.revision)){
@@ -118,7 +118,22 @@ async function importFiles(files){
 $('stopImport').onclick=()=>{stopImport=true;$('stopImport').disabled=true;$('progress').textContent+='\n将在当前文件处理完成后停止。';};
 $('files').onchange=e=>importFiles(e.target.files);$('folders').onchange=e=>importFiles(e.target.files);
 document.addEventListener('dragover',e=>{e.preventDefault();});document.addEventListener('drop',e=>{e.preventDefault();importFiles(e.dataTransfer.files);});
-$('export').onclick=()=>{const a=document.createElement('a');a.href='/api/export?token='+token;a.download='paperdesk-catalog.json';a.click();};
+$('export').onclick=()=>$('exportDialog').showModal();
+$('closeExport').onclick=()=>$('exportDialog').close();
+function downloadCatalog(endpoint,filename){const a=document.createElement('a');a.href=endpoint+'?token='+token;a.download=filename;a.click();}
+$('exportJson').onclick=()=>downloadCatalog('/api/export','paperdesk-catalog.json');
+$('exportBib').onclick=()=>downloadCatalog('/api/export.bib','paperdesk-references.bib');
+$('backup').onclick=async()=>{
+  if(backingUp)return;
+  backingUp=true;$('backup').disabled=true;$('backupStatus').hidden=false;
+  $('backupStatus').textContent='正在复制并校验文献，请保持程序运行。备份仅包含点击时已保存的内容。';
+  try{
+    const result=await api('/api/backup',{method:'POST'});
+    $('backupStatus').textContent=`备份完成：${result.count} 篇，${(result.bytes/1024/1024).toFixed(2)} MB\n位置：${result.path}\n请将此文件夹复制到外部磁盘。恢复方法见 README。`;
+    toast('完整备份已完成');
+  }catch(e){$('backupStatus').textContent=e.message;toast('备份失败，请查看提示');}
+  finally{backingUp=false;$('backup').disabled=false;}
+};
 $('help').onclick=()=>$('helpDialog').showModal();$('closeHelp').onclick=()=>$('helpDialog').close();
-window.addEventListener('beforeunload',e=>{if(dirty||importing||saving){e.preventDefault();e.returnValue='';}});
+window.addEventListener('beforeunload',e=>{if(dirty||importing||saving||backingUp){e.preventDefault();e.returnValue='';}});
 load().catch(e=>toast('无法连接文栖：'+e.message));

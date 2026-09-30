@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {mkdtemp,rm,readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -98,4 +98,30 @@ test('旧文献库无需迁移，保存时添加版本号',async()=>{
     await assert.rejects(start(dir),/启动失败/);
     assert.equal((await app.call('/api/papers')).status,200);
   }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('备份 API 与恢复命令可恢复可启动的完整文献库',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-backup-api-'));let app,restored;
+  try{
+    app=await start(join(dir,'original'));
+    const paper=(await (await app.call('/api/import?name=example.pdf',{method:'POST',body:'%PDF-1.4\nbackup api\n%%EOF'})).json()).paper;
+    const backupResponse=await app.call('/api/backup',{method:'POST'});assert.equal(backupResponse.status,201);
+    const backup=await backupResponse.json();assert.equal(backup.count,1);
+    const target=join(dir,'restored');
+    const script=fileURLToPath(new URL('../scripts/restore.mjs',import.meta.url));
+    execFileSync(process.execPath,[script,backup.path,target]);
+    restored=await start(target);
+    const restoredPaper=(await (await restored.call('/api/papers')).json()).papers[0];
+    assert.equal(restoredPaper.id,paper.id);
+    assert.equal(await (await restored.call('/api/papers/'+paper.id+'/file')).text(),'%PDF-1.4\nbackup api\n%%EOF');
+    assert.equal((await app.call('/api/papers')).status,200);
+    const bib=await app.call('/api/export.bib?id='+paper.id);assert.equal(bib.status,200);assert.match(await bib.text(),/@misc/);
+    assert.equal((await app.call('/api/export.bib?id=missing')).status,404);
+    await app.call('/api/papers/'+paper.id,{method:'PATCH',body:JSON.stringify({trashed:true,expectedRevision:1})});
+    assert.equal((await app.call('/api/export.bib?id='+paper.id)).status,404);
+    assert.equal((await (await app.call('/api/export.bib')).text()).trim(),'');
+  }finally{
+    if(restored)await restored.stop();if(app)await app.stop();await rm(dir,{recursive:true,force:true});
+  }
 });

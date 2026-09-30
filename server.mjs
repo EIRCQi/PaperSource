@@ -5,18 +5,23 @@ import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {randomBytes, randomUUID, createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
+import {createBackup, validateCatalog} from './lib/archive.mjs';
+import {toBibtex} from './lib/bibtex.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
 const data=path.resolve(process.env.PAPERDESK_DATA || path.join(os.homedir(),'PaperDeskData'));
 fs.mkdirSync(path.join(data,'files'),{recursive:true,mode:0o700});
 const lock=path.join(data,'running.lock');
 try { fs.writeFileSync(lock,String(process.pid),{flag:'wx',mode:0o600}); }
-catch { console.error(`文栖数据目录已锁定。请关闭其他文栖窗口对应的终端。\n若上次异常退出，请确认文栖进程已停止，再删除 ${lock}`); process.exit(1); }
+catch(error) { if(error.code!=='EEXIST'){console.error(`无法创建运行锁，请检查数据目录权限和磁盘空间：${data}`);process.exit(1);} console.error(`文栖数据目录已锁定。请关闭其他文栖窗口对应的终端。\n若上次异常退出，请确认文栖进程已停止，再删除 ${lock}`); process.exit(1); }
 process.on('exit',()=>{try{fs.unlinkSync(lock);}catch{}});
 for(const sig of ['SIGINT','SIGTERM']) process.on(sig,()=>process.exit(0));
 const dbPath=path.join(data,'catalog.json');
 let db={version:1,papers:[]};
-if(fs.existsSync(dbPath)) { db=JSON.parse(fs.readFileSync(dbPath,'utf8')); if(db.version!==1||!Array.isArray(db.papers)) throw Error('文献数据库格式不受支持'); }
+if(fs.existsSync(dbPath)) {
+  try{db=validateCatalog(JSON.parse(fs.readFileSync(dbPath,'utf8')));}
+  catch(error){console.error(`无法读取文献库：${error.message}\n原文件未修改：${dbPath}\n请先保留原目录，再使用完整备份恢复到新目录。`);process.exit(1);}
+}
 function commit(next) {
   const temp=dbPath+'.tmp';
   const fd=fs.openSync(temp,'w',0o600);
@@ -26,6 +31,7 @@ function commit(next) {
 }
 const token=randomBytes(32).toString('hex');
 let origin;
+let backupBusy=false;
 function fail(status,message){throw Object.assign(new Error(message),{status});}
 async function body(req,max=1024*1024){let size=0;const parts=[];for await(const p of req){size+=p.length;if(size>max)fail(413,'文件过大，单个 PDF 最大 50 MB');parts.push(p);}return Buffer.concat(parts);}
 async function json(req){try{return JSON.parse((await body(req)).toString());}catch(e){if(e.status)throw e;fail(400,'请求格式错误');}}
@@ -53,7 +59,7 @@ const server=http.createServer(async(req,res)=>{
       const existing=db.papers.find(p=>p.hash===hash);
       if(existing)return send({paper:existing,duplicate:true});
       const name=(url.searchParams.get('name')||'未命名.pdf').slice(0,500);
-      const paper={id:randomUUID(),revision:1,hash,filename:name,title:name.replace(/\.pdf$/i,'')||'未命名文献',authors:'',year:'',doi:'',journal:'',tags:[],notes:'',status:'unread',favorite:false,trashed:false,createdAt:new Date().toISOString(),size:bytes.length};
+      const paper={id:randomUUID(),revision:1,hash,filename:name,title:name.replace(/\.pdf$/i,'').trim()||'未命名文献',authors:'',year:'',doi:'',journal:'',tags:[],notes:'',status:'unread',favorite:false,trashed:false,createdAt:new Date().toISOString(),size:bytes.length};
       fs.writeFileSync(path.join(data,'files',hash+'.pdf'),bytes,{mode:0o600});
       commit({...db,papers:[paper,...db.papers]});return send({paper,duplicate:false},201);
     }
@@ -92,6 +98,20 @@ const server=http.createServer(async(req,res)=>{
         next.revision=(paper.revision||0)+1;
         next.updatedAt=new Date().toISOString();commit({...db,papers:db.papers.map(p=>p.id===next.id?next:p)});return send(next);
       }
+    }
+    if(req.method==='POST'&&url.pathname==='/api/backup'){
+      if(backupBusy)fail(409,'已有备份正在进行，请等待完成');
+      backupBusy=true;
+      try{return send(await createBackup(data,db),201);}
+      catch(error){fail(500,'备份未完成，原文献库未改动。'+error.message);}
+      finally{backupBusy=false;}
+    }
+    if(req.method==='GET'&&url.pathname==='/api/export.bib'){
+      const id=url.searchParams.get('id');
+      const selected=id?db.papers.filter(p=>p.id===id&&!p.trashed):db.papers;
+      if(id&&!selected.length)fail(404,'文献不存在或已在回收站');
+      res.writeHead(200,{'Content-Type':'application/x-bibtex; charset=utf-8','Content-Disposition':'attachment; filename="paperdesk-references.bib"'});
+      return res.end(toBibtex(selected));
     }
     if(req.method==='GET'&&url.pathname==='/api/export'){
       res.setHeader('Content-Disposition','attachment; filename="paperdesk-catalog.json"');return send(db);
