@@ -7,6 +7,7 @@ import {randomBytes, randomUUID, createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {createBackup, validateCatalog} from './lib/archive.mjs';
 import {toBibtex} from './lib/bibtex.mjs';
+import {applyBatch} from './lib/batch.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
 const data=path.resolve(process.env.PAPERDESK_DATA || path.join(os.homedir(),'PaperDeskData'));
@@ -52,6 +53,12 @@ const server=http.createServer(async(req,res)=>{
     }
     if((req.headers['x-paperdesk-token']||url.searchParams.get('token'))!==token)fail(403,'请刷新页面后重试');
     if(req.method==='GET'&&url.pathname==='/api/papers')return send({papers:db.papers,dataPath:data});
+    if(req.method==='POST'&&url.pathname==='/api/batch'){
+      const request=await json(req);
+      const result=applyBatch(db,request);
+      commit(result.catalog);
+      return send({papers:result.papers,count:result.papers.length});
+    }
     if(req.method==='POST'&&url.pathname==='/api/import'){
       const bytes=await body(req,50*1024*1024);
       if(!bytes.subarray(0,1024).includes(Buffer.from('%PDF-')))fail(400,'文件不是有效的 PDF');

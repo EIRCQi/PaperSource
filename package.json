@@ -1,1 +1,1 @@
-{"name":"paperdesk-local","version":"0.3.0","private":true,"type":"module","description":"文栖：本地中文文献管理器","engines":{"node":">=20"},"scripts":{"start":"node server.mjs","open":"node server.mjs --open","test":"node --test","restore":"node scripts/restore.mjs"}}
+{"name":"paperdesk-local","version":"0.4.0","private":true,"type":"module","description":"文栖：本地中文文献管理器","engines":{"node":">=20"},"scripts":{"start":"node server.mjs","open":"node server.mjs --open","test":"node --test","restore":"node scripts/restore.mjs"}}

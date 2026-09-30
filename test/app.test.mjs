@@ -125,3 +125,51 @@ test('备份 API 与恢复命令可恢复可启动的完整文献库',async()=>{
     if(restored)await restored.stop();if(app)await app.stop();await rm(dir,{recursive:true,force:true});
   }
 });
+
+test('批量接口一次持久化，冲突或非法请求不部分写入',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-batch-api-'));let app;
+  try{
+    app=await start(dir);
+    const ps=[];
+    for(let i=0;i<3;i++)ps.push((await (await app.call('/api/import?name='+i+'.pdf',{method:'POST',body:'%PDF-1.4\nbatch '+i+'\n%%EOF'})).json()).paper);
+    const items=ps.slice(0,2).map(p=>({id:p.id,expectedRevision:1}));
+    const send=(request)=>app.call('/api/batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});
+    assert.equal((await fetch(app.base+'/api/batch',{method:'POST',body:'{}'})).status,403);
+    const response=await send({items,action:'addTag',value:'测试标签'});assert.equal(response.status,200);assert.equal((await response.json()).count,2);
+    const disk=await readFile(join(dir,'catalog.json'),'utf8');
+    const stale=[{id:ps[0].id,expectedRevision:2},{id:ps[1].id,expectedRevision:1}];
+    assert.equal((await send({items:stale,action:'trash'})).status,409);
+    assert.equal(await readFile(join(dir,'catalog.json'),'utf8'),disk);
+    assert.equal((await send({items:ps.slice(0,2).map(p=>({id:p.id,expectedRevision:2})),action:'removeTag',value:'标签一,标签二'})).status,400);
+    assert.equal(await readFile(join(dir,'catalog.json'),'utf8'),disk);
+    await app.stop();app=await start(dir);
+    let saved=(await (await app.call('/api/papers')).json()).papers;
+    assert.deepEqual(saved.find(p=>p.id===ps[0].id).tags,['测试标签']);
+    assert.deepEqual(saved.find(p=>p.id===ps[2].id).tags,[]);
+    assert.equal(saved.find(p=>p.id===ps[2].id).revision,1);
+    for(const action of ['trash','restore']){
+      const selected=saved.filter(p=>p.id!==ps[2].id).map(p=>({id:p.id,expectedRevision:p.revision}));
+      const result=await app.call('/api/batch',{method:'POST',body:JSON.stringify({items:selected,action})});assert.equal(result.status,200);
+      saved=(await (await app.call('/api/papers')).json()).papers;
+      assert.equal(saved.find(p=>p.id===ps[0].id).trashed,action==='trash');
+      assert.equal((await app.call('/api/papers/'+ps[0].id+'/file')).status,200);
+    }
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('批量更新与单篇保存竞争时不互相覆盖',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-batch-race-'));let app;
+  try{
+    app=await start(dir);
+    const ps=[];
+    for(let i=0;i<2;i++)ps.push((await (await app.call('/api/import',{method:'POST',body:'%PDF-1.4\nrace '+i+'\n%%EOF'})).json()).paper);
+    const [batch,single]=await Promise.all([
+      app.call('/api/batch',{method:'POST',body:JSON.stringify({items:ps.map(p=>({id:p.id,expectedRevision:1})),action:'favorite',value:true})}),
+      app.call('/api/papers/'+ps[1].id,{method:'PATCH',body:JSON.stringify({expectedRevision:1,notes:'单篇保存'})}),
+    ]);
+    assert.deepEqual([batch.status,single.status].sort(),[200,409]);
+    const saved=(await (await app.call('/api/papers')).json()).papers;
+    if(batch.status===200){assert.equal(saved.every(p=>p.favorite),true);assert.equal(saved.every(p=>p.notes===''),true);}
+    else{assert.equal(saved.every(p=>!p.favorite),true);assert.equal(saved.find(p=>p.id===ps[1].id).notes,'单篇保存');assert.equal(saved.find(p=>p.id===ps[0].id).revision,1);}
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});
