@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+PaperDeskData/
+catalog.json
+catalog.json.bak
+catalog.json.tmp
+running.lock
+*.pdf
