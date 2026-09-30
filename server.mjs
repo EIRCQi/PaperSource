@@ -10,6 +10,7 @@ import {toBibtex} from './lib/bibtex.mjs';
 import {applyBatch} from './lib/batch.mjs';
 import {settings,suggestTags,previewClassification,applyClassification} from './lib/classify.mjs';
 import {purgeTrashed,recoverDeletions} from './lib/purge.mjs';
+import {extractMetadata} from './lib/metadata.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
 const data=path.resolve(process.env.PAPERDESK_DATA || path.join(os.homedir(),'PaperDeskData'));
@@ -83,10 +84,26 @@ const server=http.createServer(async(req,res)=>{
       const existing=db.papers.find(p=>p.hash===hash);
       if(existing)return send({paper:existing,duplicate:true});
       const name=(url.searchParams.get('name')||'未命名.pdf').slice(0,500);
-      const paper={id:randomUUID(),revision:1,hash,filename:name,title:name.replace(/\.pdf$/i,'').trim()||'未命名文献',authors:'',year:'',doi:'',journal:'',tags:[],notes:'',status:'unread',favorite:false,trashed:false,createdAt:new Date().toISOString(),size:bytes.length};
+      const paper={id:randomUUID(),revision:1,hash,filename:name,title:name.replace(/\.pdf$/i,'').trim()||'未命名文献',authors:'',year:'',doi:'',journal:'',keywords:'',tags:[],notes:'',status:'unread',favorite:false,trashed:false,createdAt:new Date().toISOString(),size:bytes.length};
+      const recognition=await extractMetadata(bytes);
+      // Parsing is asynchronous: another import may have committed this hash.
+      const duplicate=db.papers.find(p=>p.hash===hash);
+      if(duplicate)return send({paper:duplicate,duplicate:true});
+      Object.assign(paper,recognition.fields);paper.metadata={status:recognition.status,message:recognition.message,sources:recognition.sources};
       const config=settings(db);if(config.autoOnImport)paper.tags=suggestTags(paper,config.rules).map(m=>m.tag);
       fs.writeFileSync(path.join(data,'files',hash+'.pdf'),bytes,{mode:0o600});
       commit({...db,papers:[paper,...db.papers]});return send({paper,duplicate:false},201);
+    }
+    const metadataMatch=url.pathname.match(/^\/api\/papers\/([a-f0-9-]+)\/metadata$/);
+    if(req.method==='POST'&&metadataMatch){
+      const paper=db.papers.find(p=>p.id===metadataMatch[1]);if(!paper)fail(404,'文献不存在');
+      const file=path.join(data,'files',paper.hash+'.pdf');
+      if(!fs.existsSync(file))fail(404,'PDF 文件丢失，请从备份恢复');
+      const stat=fs.statSync(file);if(stat.size>50*1024*1024)fail(413,'PDF 超过识别大小限制');
+      const result=await extractMetadata(fs.readFileSync(file));
+      const current=db.papers.find(p=>p.id===paper.id);
+      if(!current||(current.revision||0)!==(paper.revision||0))fail(409,'文献已变化，请刷新后重新识别');
+      return send({...result,expectedRevision:paper.revision||0});
     }
     const match=url.pathname.match(/^\/api\/papers\/([a-f0-9-]+)(\/file)?$/);
     if(match){
@@ -116,7 +133,7 @@ const server=http.createServer(async(req,res)=>{
         if(!Number.isSafeInteger(changes.expectedRevision))fail(428,'页面版本过旧，请刷新页面后再保存');
         if(changes.expectedRevision!==(paper.revision||0))fail(409,'此文献已在其他页面更新。你的草稿仍保留，请复制需要的内容，再重新载入最新版本。');
         const next={...paper};
-        for(const key of ['title','authors','year','doi','journal','notes'])if(key in changes){if(typeof changes[key]!=='string'||changes[key].length>(key==='notes'?100000:2000))fail(400,'字段过长或格式错误');next[key]=key==='notes'?changes[key]:changes[key].trim();}
+        for(const key of ['title','authors','year','doi','journal','keywords','notes'])if(key in changes){if(typeof changes[key]!=='string'||changes[key].length>(key==='notes'?100000:2000))fail(400,'字段过长或格式错误');next[key]=key==='notes'?changes[key]:changes[key].trim();}
         if(!next.title)fail(400,'标题不能为空');
         if('tags'in changes){if(!Array.isArray(changes.tags)||changes.tags.length>50||changes.tags.some(t=>typeof t!=='string'||t.length>80))fail(400,'标签格式错误');next.tags=[...new Set(changes.tags.map(t=>t.trim()).filter(Boolean))];}
         if('status'in changes){if(!['unread','reading','done'].includes(changes.status))fail(400,'阅读状态无效');next.status=changes.status;}

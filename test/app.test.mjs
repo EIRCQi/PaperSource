@@ -212,3 +212,34 @@ test('彻底清除接口校验确认文字和回收站状态，清除后可重�
     assert.equal(await (await app.call('/api/papers/'+again.paper.id+'/file')).text(),bytes);
   }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
 });
+
+test('自动题录导入、关键词分类、只读预览、版本保护、备份与重启',async()=>{
+  const {samplePdf}=await import('../fixtures/pdf.mjs');
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-metadata-'));let app,restored;
+  try{
+    app=await start(dir);
+    const bytes=samplePdf({info:{Title:'研究方法',Author:'张三; 李四',Keywords:'deep learning; 本地检索'}});
+    const responses=await Promise.all([0,1].map(()=>app.call('/api/import?name=paper.pdf',{method:'POST',body:bytes})));
+    assert.deepEqual(responses.map(r=>r.status).sort(),[200,201]);
+    const results=await Promise.all(responses.map(r=>r.json()));assert.equal(results.filter(r=>r.duplicate).length,1);
+    const p=results[0].paper;assert.equal(p.title,'研究方法');assert.equal(p.authors,'张三; 李四');assert.equal(p.keywords,'deep learning; 本地检索');assert.ok(p.tags.includes('机器学习'));
+    assert.equal((await (await app.call('/api/papers')).json()).papers.length,1);
+    assert.equal((await fetch(app.base+'/api/papers/'+p.id+'/metadata',{method:'POST'})).status,403);
+    const change=await app.call('/api/papers/'+p.id,{method:'PATCH',body:JSON.stringify({expectedRevision:1,title:'手工标题',keywords:'手工关键词',notes:'保留的笔记'})});assert.equal(change.status,200);
+    const before=await readFile(join(dir,'catalog.json'),'utf8');
+    const preview=await (await app.call('/api/papers/'+p.id+'/metadata',{method:'POST'})).json();
+    assert.equal(preview.fields.title,'研究方法');assert.equal(preview.expectedRevision,2);
+    assert.equal(await readFile(join(dir,'catalog.json'),'utf8'),before);
+    assert.equal((await app.call('/api/papers/'+p.id,{method:'PATCH',body:JSON.stringify({expectedRevision:1,keywords:'过期结果'})})).status,409);
+    assert.equal((await app.call('/api/papers/'+p.id,{method:'PATCH',body:JSON.stringify({expectedRevision:2,keywords:['不是字符串']})})).status,400);
+    const bib=await (await app.call('/api/export.bib')).text();assert.match(bib,/手工关键词/);
+    const backup=await (await app.call('/api/backup',{method:'POST'})).json();
+    const target=join(dir,'restored');execFileSync(process.execPath,[fileURLToPath(new URL('../scripts/restore.mjs',import.meta.url)),backup.path,target]);
+    restored=await start(target);
+    const restoredPaper=(await (await restored.call('/api/papers')).json()).papers[0];assert.equal(restoredPaper.keywords,'手工关键词');
+    await app.stop();app=await start(dir);
+    const saved=(await (await app.call('/api/papers')).json()).papers[0];assert.equal(saved.title,'手工标题');assert.equal(saved.notes,'保留的笔记');assert.equal(saved.keywords,'手工关键词');
+    const broken=await app.call('/api/import?name=broken.pdf',{method:'POST',body:'%PDF-1.4\nbroken-metadata-test'});assert.equal(broken.status,201);
+    assert.equal((await broken.json()).paper.metadata.status,'failed');
+  }finally{if(restored)await restored.stop();if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});

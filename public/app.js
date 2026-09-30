@@ -40,7 +40,7 @@ function batchFields(){
 function rebuildIndex(){
   searchIndex.clear();classSuggestions.clear();
   for(const p of papers)classSuggestions.set(p.id,suggestTags(p,classification.rules));
-  for(const p of papers)searchIndex.set(p.id,[p.title,p.authors,p.year,p.doi,p.journal,p.notes,...p.tags].join(' ').normalize('NFKC').toLocaleLowerCase());
+  for(const p of papers)searchIndex.set(p.id,[p.title,p.authors,p.year,p.doi,p.journal,p.keywords,p.notes,...p.tags].join(' ').normalize('NFKC').toLocaleLowerCase());
 }
 function readDraft(id){try{return JSON.parse(sessionStorage.getItem(draftPrefix+id)||'null');}catch{return null;}}
 function deleteDraft(id){try{sessionStorage.removeItem(draftPrefix+id);}catch{}}
@@ -84,8 +84,9 @@ function renderDetail(){
   let editRevision=p.revision||0;
   dirty=false;
   const pdf=`/api/papers/${p.id}/file?token=${token}`;
-  $('detail').innerHTML=`<div class="detail-head"><span>文献详情</span><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div><form id="edit"><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div><label>阅读笔记<textarea name="notes" rows="6" maxlength="100000" placeholder="研究问题、主要结论，以及你的思考…">${esc(p.notes)}</textarea></label><div class="save-row"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState">已保存</span><button type="button" id="reloadDetail">重新载入</button><button class="subtle" id="trash" type="button">${p.trashed?'恢复文献':'移入回收站'}</button></div></form><details class="preview"><summary>展开 PDF 预览</summary><iframe title="PDF 文献预览" data-src="${pdf}"></iframe></details><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
+  $('detail').innerHTML=`<div class="detail-head"><span>文献详情</span><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div><form id="edit"><div class="metadata-bar"><button type="button" id="recognize">识别题录</button><span>${esc(p.metadata?.message||'可从 PDF 自动提取题录，结果需核对。')}</span></div><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('keywords','论文关键词',p.keywords||'','论文中的关键词，用分号分隔')}${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div><label>阅读笔记<textarea name="notes" rows="6" maxlength="100000" placeholder="研究问题、主要结论，以及你的思考…">${esc(p.notes)}</textarea></label><div class="save-row"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState">已保存</span><button type="button" id="reloadDetail">重新载入</button><button class="subtle" id="trash" type="button">${p.trashed?'恢复文献':'移入回收站'}</button></div></form><details class="preview"><summary>展开 PDF 预览</summary><iframe title="PDF 文献预览" data-src="${pdf}"></iframe></details><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
   const form=$('edit');
+  $('recognize').onclick=()=>recognizePaper(p,form,editRevision);
   const draft=readDraft(p.id);
   if(draft&&draft.values&&Number.isSafeInteger(draft.revision)){
     for(const [key,value] of Object.entries(draft.values)){
@@ -194,14 +195,14 @@ document.addEventListener('keydown',e=>{
 $('import').onclick=()=>$('files').click();$('folder').onclick=()=>$('folders').click();
 async function importFiles(files){
   if(importing){toast('正在导入，请稍候');return;}
-  if(saving||$('batchDialog').open||$('classDialog').open||$('purgeDialog').open){toast('请先完成当前整理操作');return;}
+  if(saving||$('batchDialog').open||$('classDialog').open||$('purgeDialog').open||$('metadataDialog').open){toast('请先完成当前整理操作');return;}
   const pdfs=[...files].filter(f=>/\.pdf$/i.test(f.name));if(!pdfs.length){toast('没有找到 PDF 文件');return;}
   lastImported=[];$('showImported').hidden=true;importing=true;stopImport=false;$('stopImport').hidden=false;$('stopImport').disabled=false;$('progress').hidden=false;$('import').disabled=$('folder').disabled=true;renderBulk();
-  let added=0,classified=0,duplicates=0,trashDuplicates=0,processed=0,failed=[];
+  let added=0,classified=0,recognized=0,needsMetadata=0,duplicates=0,trashDuplicates=0,processed=0,failed=[];
   for(let i=0;i<pdfs.length;i++){if(stopImport)break;const file=pdfs[i];$('progress').textContent=`正在导入 ${i+1} / ${pdfs.length}：${file.name}`;
-    try{if(file.size>50*1024*1024)throw Error('超过 50 MB 限制');const result=await api('/api/import?name='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':'application/pdf'},body:file});if(result.duplicate){duplicates++;if(result.paper.trashed)trashDuplicates++;}else{added++;if(result.paper.tags.length)classified++;lastImported.push(result.paper.id);}}catch(e){failed.push(`${file.name}：${e.message}`);}processed++;}
+    try{if(file.size>50*1024*1024)throw Error('超过 50 MB 限制');const result=await api('/api/import?name='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':'application/pdf'},body:file});if(result.duplicate){duplicates++;if(result.paper.trashed)trashDuplicates++;}else{added++;if(result.paper.metadata?.status==='recognized')recognized++;else needsMetadata++;if(result.paper.tags.length)classified++;lastImported.push(result.paper.id);}}catch(e){failed.push(`${file.name}：${e.message}`);}processed++;}
   $('stopImport').hidden=true;$('files').value=$('folders').value='';
-  $('progress').textContent=`${stopImport?'已停止':'导入完成'}：新增 ${added} 篇（自动分类 ${classified} 篇），重复 ${duplicates} 篇，失败 ${failed.length} 篇，未处理 ${pdfs.length-processed} 篇。${trashDuplicates?'其中 '+trashDuplicates+' 篇重复文献在回收站，请前往恢复。':''}${failed.length?'\n'+failed.join('\n'):''}`;
+  $('progress').textContent=`${stopImport?'已停止':'导入完成'}：新增 ${added} 篇（识别题录 ${recognized} 篇，自动分类 ${classified} 篇，题录待手填 ${needsMetadata} 篇），重复 ${duplicates} 篇，失败 ${failed.length} 篇，未处理 ${pdfs.length-processed} 篇。${trashDuplicates?'其中 '+trashDuplicates+' 篇重复文献在回收站，请前往恢复。':''}${failed.length?'\n'+failed.join('\n'):''}`;
   try{await load();}catch(e){toast(e.message);}finally{importing=false;$('import').disabled=$('folder').disabled=false;renderBulk();}$('showImported').hidden=lastImported.length===0;toast('导入任务完成');
 }
 $('showImported').onclick=()=>{if(saving)return;clearSelection();view='recent';page=1;$('search').value='';renderList();};
@@ -300,3 +301,38 @@ $('purgeForm').onsubmit=async e=>{
 $('help').onclick=()=>$('helpDialog').showModal();$('closeHelp').onclick=()=>$('helpDialog').close();
 window.addEventListener('beforeunload',e=>{if(dirty||importing||saving||backingUp){e.preventDefault();e.returnValue='';}});
 load().catch(e=>toast('无法连接文栖：'+e.message));
+
+const metadataLabels={title:'标题',authors:'作者',keywords:'关键词',doi:'DOI',year:'发表年份',journal:'期刊 / 会议'};
+let metadataContext=null;
+async function recognizePaper(p,form,revision){
+  if(saving||importing){toast('请等待当前操作完成');return;}
+  saving=true;editorEnabled(false);renderBulk();
+  metadataContext=null;$('metadataResults').innerHTML='';$('metadataMessage').textContent='正在读取 PDF 题录与前两页文字…';
+  $('applyMetadata').disabled=true;$('closeMetadata').disabled=true;$('metadataDialog').showModal();
+  try{
+    const result=await api('/api/papers/'+p.id+'/metadata',{method:'POST'});
+    if(result.expectedRevision!==revision)throw Error('当前编辑基于旧版本，请先保留草稿并重新载入最新文献。');
+    metadataContext={form,result,id:p.id};
+    $('metadataMessage').textContent=result.message+' 勾选要填入的字段；已有内容默认不勾选。';
+    $('metadataResults').innerHTML=Object.entries(metadataLabels).filter(([key])=>result.fields[key]).map(([key,label])=>{
+      const current=form.elements.namedItem(key).value;
+      const filenameTitle=p.filename.replace(/\.pdf$/i,'').trim();
+      const checked=!current.trim()||(key==='title'&&current===filenameTitle);
+      return `<label class="metadata-choice"><input type="checkbox" data-metadata="${key}" ${checked?'checked':''}><span><strong>${label}</strong><small>当前：${esc(current)||'未填写'}</small><b>${esc(result.fields[key])}</b><small>${esc(result.sources[key])}</small></span></label>`;
+    }).join('');
+    updateMetadataButton();
+  }catch(error){$('metadataMessage').textContent=error.message;}
+  finally{saving=false;editorEnabled(true);renderBulk();$('closeMetadata').disabled=false;}
+}
+function updateMetadataButton(){$('applyMetadata').disabled=!document.querySelector('#metadataResults input:checked');}
+$('metadataResults').onchange=updateMetadataButton;
+$('metadataDialog').addEventListener('cancel',e=>{if(saving)e.preventDefault();else metadataContext=null;});
+$('closeMetadata').onclick=()=>{if(!saving){$('metadataDialog').close();metadataContext=null;}};
+$('applyMetadata').onclick=()=>{
+  const context=metadataContext;if(saving||!context||selected!==context.id||!context.form.isConnected)return;
+  for(const input of document.querySelectorAll('#metadataResults input:checked')){
+    const key=input.dataset.metadata;context.form.elements.namedItem(key).value=context.result.fields[key];
+  }
+  context.form.dispatchEvent(new Event('input',{bubbles:true}));
+  $('metadataDialog').close();metadataContext=null;toast('已填入编辑框，请核对并点击“保存修改”');
+};
