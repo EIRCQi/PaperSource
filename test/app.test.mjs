@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {mkdtemp,rm,readFile} from 'node:fs/promises';
+import {mkdtemp,rm,readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -27,13 +27,14 @@ test('文献完整生命周期、持久化与访问边界',async()=>{
     const p=(await imported.json()).paper;
     assert.equal(p.title,'论文测试');
     assert.equal((await (await app.call('/api/import',{method:'POST',body:pdf})).json()).duplicate,true);
-    const update={title:'研究结果',notes:'发现与思考 <script>test</script>',tags:['机器学习','机器学习'],status:'reading',favorite:true};
+    const update={expectedRevision:1,title:'研究结果',notes:'  发现与思考 <script>test</script>\n\n',tags:['机器学习','机器学习'],status:'reading',favorite:true};
     const patched=await app.call('/api/papers/'+p.id,{method:'PATCH',body:JSON.stringify(update)});assert.equal(patched.status,200);assert.deepEqual((await patched.json()).tags,['机器学习']);
-    assert.equal((await app.call('/api/papers/'+p.id,{method:'PATCH',body:'{"title":""}'})).status,400);
-    assert.equal((await app.call('/api/papers/'+p.id,{method:'PATCH',body:'{"status":"invalid"}'})).status,400);
+    assert.equal((await app.call('/api/papers/'+p.id,{method:'PATCH',body:'{"title":"","expectedRevision":2}'})).status,400);
+    assert.equal((await app.call('/api/papers/'+p.id,{method:'PATCH',body:'{"status":"invalid","expectedRevision":2}'})).status,400);
     const partial=await app.call('/api/papers/'+p.id+'/file',{headers:{Range:'bytes=0-4'}});assert.equal(partial.status,206);assert.equal(await partial.text(),'%PDF-');
     assert.deepEqual(Buffer.from(await (await app.call('/api/papers/'+p.id+'/file')).arrayBuffer()),pdf);
-    for(const trashed of [true,false]){const res=await app.call('/api/papers/'+p.id,{method:'PATCH',body:JSON.stringify({trashed})});assert.equal((await res.json()).trashed,trashed);}
+    let revision=2;
+    for(const trashed of [true,false]){const res=await app.call('/api/papers/'+p.id,{method:'PATCH',body:JSON.stringify({trashed,expectedRevision:revision++})});assert.equal((await res.json()).trashed,trashed);}
     assert.equal((await (await app.call('/api/export')).json()).papers.length,1);
     await app.stop();app=await start(dir);
     const saved=(await (await app.call('/api/papers')).json()).papers[0];assert.equal(saved.notes,update.notes);assert.equal(saved.favorite,true);assert.equal(saved.title,update.title);
@@ -45,4 +46,56 @@ test('默认端口占用时选择可用端口',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'paperdesk-port-'));let app;
   try{app=await start(dir,String(port));assert.notEqual(new URL(app.base).port,String(port));assert.equal((await app.call('/api/papers')).status,200);}
   finally{if(app)await app.stop();await new Promise(r=>blocker.close(r));await rm(dir,{recursive:true,force:true});}
+});
+
+test('并发编辑只接受一个版本，冲突不覆盖笔记',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-conflict-'));let app;
+  try{
+    app=await start(dir);
+    const p=(await (await app.call('/api/import',{method:'POST',body:'%PDF-1.4\nconflict\n%%EOF'})).json()).paper;
+    const url='/api/papers/'+p.id;
+    assert.equal((await app.call(url,{method:'PATCH',body:JSON.stringify({notes:'无版本'})})).status,428);
+    const attempts=await Promise.all(['第一个页面','第二个页面'].map(notes=>app.call(url,{method:'PATCH',body:JSON.stringify({notes,expectedRevision:1})})));
+    assert.deepEqual(attempts.map(r=>r.status).sort(),[200,409]);
+    const winner=await attempts.find(r=>r.status===200).json();
+    const saved=(await (await app.call('/api/papers')).json()).papers[0];
+    assert.equal(saved.notes,winner.notes);assert.equal(saved.revision,2);
+    // Hold an incomplete PATCH while a different page updates the record.
+    let slow;
+    const slowResult=new Promise((resolve,reject)=>{
+      slow=http.request(app.base+url,{method:'PATCH',headers:{'X-PaperDesk-Token':app.token,'Content-Type':'application/json'}},r=>{r.resume();resolve(r.statusCode);});
+      slow.on('error',reject);slow.write('{"notes":"延迟请求","expectedRevision":');
+    });
+    await new Promise(r=>setTimeout(r,30));
+    const fresh=await app.call(url,{method:'PATCH',body:JSON.stringify({notes:'最新笔记',expectedRevision:2})});assert.equal(fresh.status,200);
+    slow.end('2}');assert.equal(await slowResult,409);
+    assert.equal((await (await app.call('/api/papers')).json()).papers[0].notes,'最新笔记');
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('PDF 后缀范围、HEAD 与无效范围返回正确结果',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-range-'));let app;
+  try{
+    app=await start(dir);const bytes='%PDF-1.4\nrange\n%%EOF';
+    const p=(await (await app.call('/api/import',{method:'POST',body:bytes})).json()).paper;
+    const url='/api/papers/'+p.id+'/file';
+    const suffix=await app.call(url,{headers:{Range:'bytes=-5'}});assert.equal(suffix.status,206);assert.equal(await suffix.text(),'%%EOF');
+    const head=await app.call(url,{method:'HEAD'});assert.equal(head.status,200);assert.equal(Number(head.headers.get('content-length')),bytes.length);assert.equal(await head.text(),'');
+    for(const range of ['bytes=-0','bytes=999-','bytes=9-2','bytes=-','bytes=0-1,3-4']){
+      const r=await app.call(url,{headers:{Range:range}});assert.equal(r.status,416,range);assert.equal(r.headers.get('content-range'),'bytes */'+bytes.length);
+    }
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('旧文献库无需迁移，保存时添加版本号',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-legacy-'));let app;
+  try{
+    app=await start(dir);await app.call('/api/import',{method:'POST',body:'%PDF-1.4\nlegacy\n%%EOF'});await app.stop();app=null;
+    const db=JSON.parse(await readFile(join(dir,'catalog.json'),'utf8'));delete db.papers[0].revision;await writeFile(join(dir,'catalog.json'),JSON.stringify(db));
+    app=await start(dir);
+    const res=await app.call('/api/papers/'+db.papers[0].id,{method:'PATCH',body:JSON.stringify({notes:'升级后保存',expectedRevision:0})});
+    assert.equal(res.status,200);assert.equal((await res.json()).revision,1);
+    await assert.rejects(start(dir),/启动失败/);
+    assert.equal((await app.call('/api/papers')).status,200);
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
 });

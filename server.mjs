@@ -53,29 +53,43 @@ const server=http.createServer(async(req,res)=>{
       const existing=db.papers.find(p=>p.hash===hash);
       if(existing)return send({paper:existing,duplicate:true});
       const name=(url.searchParams.get('name')||'未命名.pdf').slice(0,500);
-      const paper={id:randomUUID(),hash,filename:name,title:name.replace(/\.pdf$/i,''),authors:'',year:'',doi:'',journal:'',tags:[],notes:'',status:'unread',favorite:false,trashed:false,createdAt:new Date().toISOString(),size:bytes.length};
+      const paper={id:randomUUID(),revision:1,hash,filename:name,title:name.replace(/\.pdf$/i,'')||'未命名文献',authors:'',year:'',doi:'',journal:'',tags:[],notes:'',status:'unread',favorite:false,trashed:false,createdAt:new Date().toISOString(),size:bytes.length};
       fs.writeFileSync(path.join(data,'files',hash+'.pdf'),bytes,{mode:0o600});
       commit({...db,papers:[paper,...db.papers]});return send({paper,duplicate:false},201);
     }
     const match=url.pathname.match(/^\/api\/papers\/([a-f0-9-]+)(\/file)?$/);
     if(match){
-      const paper=db.papers.find(p=>p.id===match[1]);if(!paper)fail(404,'文献不存在');
-      if(req.method==='GET'&&match[2]){
+      let paper=db.papers.find(p=>p.id===match[1]);if(!paper)fail(404,'文献不存在');
+      if(['GET','HEAD'].includes(req.method)&&match[2]){
         const file=path.join(data,'files',paper.hash+'.pdf');
         if(!fs.existsSync(file))fail(404,'PDF 文件丢失，请从备份恢复');
         const stat=fs.statSync(file);let start=0,end=stat.size-1,status=200;
-        if(req.headers.range){const range=/^bytes=(\d+)-(\d*)$/.exec(req.headers.range);if(!range)fail(416,'范围无效');start=Number(range[1]);end=range[2]?Math.min(Number(range[2]),end):end;if(start>end)fail(416,'范围无效');status=206;res.setHeader('Content-Range',`bytes ${start}-${end}/${stat.size}`);}
+        if(req.headers.range&&req.method==='GET'){
+          const range=/^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+          const invalid=()=>{res.setHeader('Content-Range',`bytes */${stat.size}`);fail(416,'范围无效');};
+          if(!range||(!range[1]&&!range[2]))invalid();
+          if(range[1]){start=Number(range[1]);end=range[2]?Math.min(Number(range[2]),end):end;}
+          else{const suffix=Number(range[2]);if(!Number.isSafeInteger(suffix)||suffix<=0)invalid();start=Math.max(0,stat.size-suffix);}
+          if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>end)invalid();
+          status=206;res.setHeader('Content-Range',`bytes ${start}-${end}/${stat.size}`);
+        }
         res.writeHead(status,{'Content-Type':'application/pdf','Content-Length':end-start+1,'Accept-Ranges':'bytes','Content-Disposition':`inline; filename="paper.pdf"; filename*=UTF-8''${encodeURIComponent(paper.filename)}`});
+        if(req.method==='HEAD')return res.end();
         const stream=fs.createReadStream(file,{start,end});stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());return stream.pipe(res);
       }
       if(req.method==='PATCH'&&!match[2]){
         const changes=await json(req);if(!changes||Array.isArray(changes)||typeof changes!=='object')fail(400,'请求格式错误');
+        // The body may arrive slowly; read the latest record only after it is complete.
+        paper=db.papers.find(p=>p.id===match[1]);
+        if(!Number.isSafeInteger(changes.expectedRevision))fail(428,'页面版本过旧，请刷新页面后再保存');
+        if(changes.expectedRevision!==(paper.revision||0))fail(409,'此文献已在其他页面更新。你的草稿仍保留，请复制需要的内容，再重新载入最新版本。');
         const next={...paper};
-        for(const key of ['title','authors','year','doi','journal','notes'])if(key in changes){if(typeof changes[key]!=='string'||changes[key].length>(key==='notes'?100000:2000))fail(400,'字段过长或格式错误');next[key]=changes[key].trim();}
+        for(const key of ['title','authors','year','doi','journal','notes'])if(key in changes){if(typeof changes[key]!=='string'||changes[key].length>(key==='notes'?100000:2000))fail(400,'字段过长或格式错误');next[key]=key==='notes'?changes[key]:changes[key].trim();}
         if(!next.title)fail(400,'标题不能为空');
         if('tags'in changes){if(!Array.isArray(changes.tags)||changes.tags.length>50||changes.tags.some(t=>typeof t!=='string'||t.length>80))fail(400,'标签格式错误');next.tags=[...new Set(changes.tags.map(t=>t.trim()).filter(Boolean))];}
         if('status'in changes){if(!['unread','reading','done'].includes(changes.status))fail(400,'阅读状态无效');next.status=changes.status;}
         for(const key of ['favorite','trashed'])if(key in changes){if(typeof changes[key]!=='boolean')fail(400,'字段格式错误');next[key]=changes[key];}
+        next.revision=(paper.revision||0)+1;
         next.updatedAt=new Date().toISOString();commit({...db,papers:db.papers.map(p=>p.id===next.id?next:p)});return send(next);
       }
     }
