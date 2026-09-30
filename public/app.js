@@ -1,15 +1,23 @@
+import {suggestTags,DEFAULT_RULES,validateRules} from './classify.mjs';
 const $=id=>document.getElementById(id);
 const token=document.querySelector('meta[name="app-token"]').content;
-const labels={all:'全部文献',favorite:'星标收藏',unread:'待阅读',reading:'阅读中',done:'已读完',trash:'回收站',tag:'标签分类',recent:'本次新增'};
+const labels={all:'全部文献',favorite:'星标收藏',unread:'待阅读',reading:'阅读中',done:'已读完',trash:'回收站',tag:'标签分类',recent:'本次新增',uncategorized:'未分类',incomplete:'资料待补全',suggested:'有分类建议'};
 const states={unread:'待阅读',reading:'阅读中',done:'已读完'};
 let papers=[],view='all',tag='',selected=null,dirty=false,importing=false,saving=false,backingUp=false;
 let page=1,stopImport=false,draftPrefix='',draftWarning=false;
 const PAGE_SIZE=50;
-const searchIndex=new Map();
+const searchIndex=new Map(),classSuggestions=new Map();
+let classification={revision:0,rules:DEFAULT_RULES,autoOnImport:true};
+const emptyDetail=$('detail').innerHTML;
+let classPreview=[],classSettingsRevision=0,purgeItems=[];
 const picked=new Map();
 let visiblePage=[],lastImported=[],dataGeneration=0,filtering=false;
 function renderBulk(){
   const count=picked.size;
+  $('trashActions').hidden=view!=='trash';
+  $('purgePicked').disabled=saving||importing||backingUp||!count;
+  $('emptyTrash').disabled=saving||importing||backingUp||!papers.some(p=>p.trashed);
+  $('classify').disabled=saving||importing;
   $('selectionCount').textContent=`已选 ${count} 篇`;
   $('clearSelection').disabled=saving||count===0;
   $('openBatch').disabled=saving||importing||filtering||count===0;
@@ -30,7 +38,8 @@ function batchFields(){
   $('batchHint').textContent=action==='trash'?'选中文献将移入回收站，可以恢复；PDF 不会删除。':'只修改选中的文献；有版本冲突时整批不修改。';
 }
 function rebuildIndex(){
-  searchIndex.clear();
+  searchIndex.clear();classSuggestions.clear();
+  for(const p of papers)classSuggestions.set(p.id,suggestTags(p,classification.rules));
   for(const p of papers)searchIndex.set(p.id,[p.title,p.authors,p.year,p.doi,p.journal,p.notes,...p.tags].join(' ').normalize('NFKC').toLocaleLowerCase());
 }
 function readDraft(id){try{return JSON.parse(sessionStorage.getItem(draftPrefix+id)||'null');}catch{return null;}}
@@ -48,7 +57,7 @@ function storeDraft(id,revision,form){
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').hidden=true,5000);}
 async function api(url,options={}){const r=await fetch(url,{...options,headers:{'X-PaperDesk-Token':token,...options.headers}});const result=await r.json();if(!r.ok)throw Object.assign(new Error(result.error||'操作失败'),{status:r.status});return result;}
-async function load(){const generation=dataGeneration;const data=await api('/api/papers');if(generation!==dataGeneration)return load();papers=data.papers;clearSelection();draftPrefix='paperdesk-draft:'+data.dataPath+':';rebuildIndex();$('dataPath').textContent=data.dataPath;renderList();}
+async function load(){const generation=dataGeneration;const data=await api('/api/papers');if(generation!==dataGeneration)return load();papers=data.papers;classification=data.classification;clearSelection();draftPrefix='paperdesk-draft:'+data.dataPath+':';rebuildIndex();$('dataPath').textContent=data.dataPath;renderList();}
 function canLeave(){return !dirty||confirm('有尚未保存的修改，确定放弃这些修改吗？');}
 function renderList(){
   const live=papers.filter(p=>!p.trashed);$('total').textContent=live.length;
@@ -58,7 +67,7 @@ function renderList(){
   const q=$('search').value.trim().normalize('NFKC').toLocaleLowerCase();
   const terms=q.split(/\s+/).filter(Boolean);
   const recentIds=new Set(lastImported);
-  let shown=papers.filter(p=>view==='trash'?p.trashed:!p.trashed).filter(p=>view==='recent'?recentIds.has(p.id):view==='favorite'?p.favorite:view==='tag'?p.tags.includes(tag):states[view]?p.status===view:true).filter(p=>terms.every(term=>searchIndex.get(p.id)?.includes(term)));
+  let shown=papers.filter(p=>view==='trash'?p.trashed:!p.trashed).filter(p=>view==='uncategorized'?p.tags.length===0:view==='incomplete'?(!p.authors.trim()||!/^\d{4}$/.test(p.year)):view==='suggested'?(classSuggestions.get(p.id)||[]).length>0:view==='recent'?recentIds.has(p.id):view==='favorite'?p.favorite:view==='tag'?p.tags.includes(tag):states[view]?p.status===view:true).filter(p=>terms.every(term=>searchIndex.get(p.id)?.includes(term)));
   const eligible=new Set(shown.map(p=>p.id));for(const id of picked.keys())if(!eligible.has(id))picked.delete(id);
   shown.sort((a,b)=>$('sort').value==='title'?a.title.localeCompare(b.title,'zh'):$('sort').value==='year'?String(b.year).localeCompare(String(a.year)):b.createdAt.localeCompare(a.createdAt));
   $('heading').textContent=view==='tag'?'# '+tag:labels[view];$('summary').textContent=`${shown.length} 篇文献 · ${live.filter(p=>p.status==='done').length} 篇已读完`;
@@ -71,7 +80,7 @@ function renderList(){
 }
 function field(key,label,value,placeholder=''){return `<label>${label}<input name="${key}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${key==='title'?'required':''} maxlength="2000"></label>`;}
 function renderDetail(){
-  let p=papers.find(p=>p.id===selected);if(!p)return;
+  let p=papers.find(p=>p.id===selected);if(!p){selected=null;dirty=false;$('detail').innerHTML=emptyDetail;return;}
   let editRevision=p.revision||0;
   dirty=false;
   const pdf=`/api/papers/${p.id}/file?token=${token}`;
@@ -179,20 +188,20 @@ $('sort').onchange=()=>{page=1;renderList();};
 $('prevPage').onclick=()=>{page--;renderList();$('list').scrollTop=0;};
 $('nextPage').onclick=()=>{page++;renderList();$('list').scrollTop=0;};
 document.addEventListener('keydown',e=>{
-  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='s'&&$('edit')){e.preventDefault();if(!saving)$('edit').requestSubmit();}
-  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('search').focus();}
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='s'){e.preventDefault();if(!saving&&!document.querySelector('dialog[open]')&&$('edit'))$('edit').requestSubmit();}
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();if(!document.querySelector('dialog[open]'))$('search').focus();}
 });
 $('import').onclick=()=>$('files').click();$('folder').onclick=()=>$('folders').click();
 async function importFiles(files){
   if(importing){toast('正在导入，请稍候');return;}
-  if(saving||$('batchDialog').open){toast('请先完成当前整理操作');return;}
+  if(saving||$('batchDialog').open||$('classDialog').open||$('purgeDialog').open){toast('请先完成当前整理操作');return;}
   const pdfs=[...files].filter(f=>/\.pdf$/i.test(f.name));if(!pdfs.length){toast('没有找到 PDF 文件');return;}
   lastImported=[];$('showImported').hidden=true;importing=true;stopImport=false;$('stopImport').hidden=false;$('stopImport').disabled=false;$('progress').hidden=false;$('import').disabled=$('folder').disabled=true;renderBulk();
-  let added=0,duplicates=0,trashDuplicates=0,processed=0,failed=[];
+  let added=0,classified=0,duplicates=0,trashDuplicates=0,processed=0,failed=[];
   for(let i=0;i<pdfs.length;i++){if(stopImport)break;const file=pdfs[i];$('progress').textContent=`正在导入 ${i+1} / ${pdfs.length}：${file.name}`;
-    try{if(file.size>50*1024*1024)throw Error('超过 50 MB 限制');const result=await api('/api/import?name='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':'application/pdf'},body:file});if(result.duplicate){duplicates++;if(result.paper.trashed)trashDuplicates++;}else{added++;lastImported.push(result.paper.id);}}catch(e){failed.push(`${file.name}：${e.message}`);}processed++;}
+    try{if(file.size>50*1024*1024)throw Error('超过 50 MB 限制');const result=await api('/api/import?name='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':'application/pdf'},body:file});if(result.duplicate){duplicates++;if(result.paper.trashed)trashDuplicates++;}else{added++;if(result.paper.tags.length)classified++;lastImported.push(result.paper.id);}}catch(e){failed.push(`${file.name}：${e.message}`);}processed++;}
   $('stopImport').hidden=true;$('files').value=$('folders').value='';
-  $('progress').textContent=`${stopImport?'已停止':'导入完成'}：新增 ${added} 篇，重复 ${duplicates} 篇，失败 ${failed.length} 篇，未处理 ${pdfs.length-processed} 篇。${trashDuplicates?'其中 '+trashDuplicates+' 篇重复文献在回收站，请前往恢复。':''}${failed.length?'\n'+failed.join('\n'):''}`;
+  $('progress').textContent=`${stopImport?'已停止':'导入完成'}：新增 ${added} 篇（自动分类 ${classified} 篇），重复 ${duplicates} 篇，失败 ${failed.length} 篇，未处理 ${pdfs.length-processed} 篇。${trashDuplicates?'其中 '+trashDuplicates+' 篇重复文献在回收站，请前往恢复。':''}${failed.length?'\n'+failed.join('\n'):''}`;
   try{await load();}catch(e){toast(e.message);}finally{importing=false;$('import').disabled=$('folder').disabled=false;renderBulk();}$('showImported').hidden=lastImported.length===0;toast('导入任务完成');
 }
 $('showImported').onclick=()=>{if(saving)return;clearSelection();view='recent';page=1;$('search').value='';renderList();};
@@ -206,15 +215,88 @@ $('exportJson').onclick=()=>downloadCatalog('/api/export','paperdesk-catalog.jso
 $('exportBib').onclick=()=>downloadCatalog('/api/export.bib','paperdesk-references.bib');
 $('backup').onclick=async()=>{
   if(backingUp)return;
-  backingUp=true;$('backup').disabled=true;$('backupStatus').hidden=false;
+  backingUp=true;renderBulk();$('backup').disabled=true;$('backupStatus').hidden=false;
   $('backupStatus').textContent='正在复制并校验文献，请保持程序运行。备份仅包含点击时已保存的内容。';
   try{
     const result=await api('/api/backup',{method:'POST'});
     $('backupStatus').textContent=`备份完成：${result.count} 篇，${(result.bytes/1024/1024).toFixed(2)} MB\n位置：${result.path}\n请将此文件夹复制到外部磁盘。恢复方法见 README。`;
     toast('完整备份已完成');
   }catch(e){$('backupStatus').textContent=e.message;toast('备份失败，请查看提示');}
-  finally{backingUp=false;$('backup').disabled=false;}
+  finally{backingUp=false;$('backup').disabled=false;renderBulk();}
 };
+
+function readRules(){
+  const rules=$('classRules').value.split(/\r?\n/).filter(line=>line.trim()).map((line,index)=>{
+    const split=line.search(/[=＝]/);if(split<1)throw Error(`第 ${index+1} 行需要“标签 = 关键词, 关键词”`);
+    return {tag:line.slice(0,split).trim(),keywords:line.slice(split+1).split(/[,，]/).map(k=>k.trim()).filter(Boolean)};
+  });return validateRules(rules);
+}
+function selectedSuggestions(){
+  const ids=new Set([...document.querySelectorAll('[data-class-pick]:checked')].map(input=>input.dataset.classPick));
+  return classPreview.filter(p=>ids.has(p.id)).map(({id,expectedRevision})=>({id,expectedRevision}));
+}
+function refreshClassButton(){$('applyClass').disabled=saving||selectedSuggestions().length===0;}
+function dialogBusy(form,busy){for(const field of $(form).elements)field.disabled=busy;}
+$('classify').onclick=async()=>{
+  if(saving||importing)return;if(dirty){toast('请先保存当前编辑');return;}
+  saving=true;editorEnabled(false);renderBulk();
+  try{
+    const config=await api('/api/classify/settings');
+    classSettingsRevision=config.revision;classPreview=[];
+    $('classRules').value=config.rules.map(r=>r.tag+' = '+r.keywords.join(', ')).join('\n');
+    $('autoImport').checked=config.autoOnImport;$('classResults').innerHTML='';$('classSummary').textContent='编辑规则后点击预览，核对匹配关键词再应用。';$('classError').hidden=true;
+    $('classDialog').showModal();
+  }catch(e){toast(e.message);}finally{saving=false;editorEnabled(true);renderBulk();refreshClassButton();}
+};
+$('classRules').oninput=()=>{classPreview=[];$('classResults').innerHTML='';$('classSummary').textContent='规则已变化，请重新预览。';refreshClassButton();};
+$('classResults').onchange=refreshClassButton;
+$('classForm').onsubmit=async e=>{
+  e.preventDefault();if(saving)return;
+  saving=true;dialogBusy('classForm',true);$('classError').hidden=true;classPreview=[];$('classResults').innerHTML='';
+  try{
+    const result=await api('/api/classify/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rules:readRules()})});
+    classPreview=result.suggestions;
+    $('classSummary').textContent=`找到 ${result.total} 篇可分类文献，本次展示 ${classPreview.length} 篇（每次最多 500 篇）。可取消不合适的建议。`;
+    $('classResults').innerHTML=classPreview.map(p=>`<label class="class-result"><input type="checkbox" data-class-pick="${p.id}" checked><span><strong>${esc(p.title)}</strong><small>${p.matches.map(m=>`${esc(m.tag)} ← ${m.keywords.map(esc).join('、')}`).join('；')}</small></span></label>`).join('');
+  }catch(error){$('classError').textContent=error.message;$('classError').hidden=false;}
+  finally{saving=false;dialogBusy('classForm',false);refreshClassButton();}
+};
+async function saveClassification(apply){
+  if(saving)return;const items=apply?selectedSuggestions():[];
+  if(apply&&!items.length)return;
+  saving=true;dialogBusy('classForm',true);$('classError').hidden=true;editorEnabled(false);
+  try{
+    const result=await api('/api/classify/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items,rules:readRules(),autoOnImport:$('autoImport').checked,expectedSettingsRevision:classSettingsRevision})});
+    dataGeneration++;classification=result.classification;const changed=new Map(result.papers.map(p=>[p.id,p]));papers=papers.map(p=>changed.get(p.id)||p);clearSelection();rebuildIndex();if(changed.has(selected))renderDetail();$('classDialog').close();toast(`规则已保存，已分类 ${result.count} 篇文献`);
+  }catch(error){$('classError').textContent=error.message;$('classError').hidden=false;}
+  finally{saving=false;editorEnabled(true);dialogBusy('classForm',false);refreshClassButton();renderList();}
+}
+$('applyClass').onclick=()=>saveClassification(true);
+$('saveClassRules').onclick=()=>saveClassification(false);
+$('closeClass').onclick=()=>{if(!saving)$('classDialog').close();};
+$('classDialog').addEventListener('cancel',e=>{if(saving)e.preventDefault();});
+function openPurge(all){
+  if(saving||importing||backingUp)return;if(dirty){toast('请先保存当前编辑');return;}
+  const chosen=papers.filter(p=>p.trashed&&(all||picked.has(p.id)));
+  if(!chosen.length){toast('没有可清除的文献');return;}
+  if(chosen.length>10000){toast('每次最多清除 10000 篇，请使用勾选删除分批处理');return;}
+  purgeItems=chosen.map(p=>({id:p.id,expectedRevision:all?p.revision||0:picked.get(p.id)}));
+  $('purgeSummary').textContent=`${all?'整个回收站（包括搜索或筛选外的文献）':'勾选的回收站文献'}：${chosen.length} 篇。${chosen.slice(0,3).map(p=>p.title).join('、')}${chosen.length>3?'…':''}`;
+  $('purgePhrase').textContent=`永久删除 ${chosen.length} 篇`;$('purgeConfirm').value='';$('confirmPurge').disabled=true;$('purgeError').hidden=true;$('purgeDialog').showModal();
+}
+$('emptyTrash').onclick=()=>openPurge(true);$('purgePicked').onclick=()=>openPurge(false);
+$('purgeConfirm').oninput=()=>{$('confirmPurge').disabled=$('purgeConfirm').value!==`永久删除 ${purgeItems.length} 篇`;};
+$('cancelPurge').onclick=()=>{if(!saving)$('purgeDialog').close();};
+$('purgeDialog').addEventListener('cancel',e=>{if(saving)e.preventDefault();});
+$('purgeForm').onsubmit=async e=>{
+  e.preventDefault();if(saving)return;saving=true;dialogBusy('purgeForm',true);editorEnabled(false);$('purgeError').hidden=true;
+  try{
+    const result=await api('/api/purge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:purgeItems,confirmation:$('purgeConfirm').value})});
+    dataGeneration++;const removed=new Set(result.ids);papers=papers.filter(p=>!removed.has(p.id));for(const id of removed)deleteDraft(id);clearSelection();rebuildIndex();if(removed.has(selected))renderDetail();$('purgeDialog').close();toast(result.warning||`已彻底清除 ${result.count} 篇文献`);
+  }catch(error){$('purgeError').textContent=error.message;$('purgeError').hidden=false;}
+  finally{saving=false;dialogBusy('purgeForm',false);editorEnabled(true);renderList();}
+};
+
 $('help').onclick=()=>$('helpDialog').showModal();$('closeHelp').onclick=()=>$('helpDialog').close();
 window.addEventListener('beforeunload',e=>{if(dirty||importing||saving||backingUp){e.preventDefault();e.returnValue='';}});
 load().catch(e=>toast('无法连接文栖：'+e.message));

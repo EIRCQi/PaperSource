@@ -8,6 +8,8 @@ import {spawn} from 'node:child_process';
 import {createBackup, validateCatalog} from './lib/archive.mjs';
 import {toBibtex} from './lib/bibtex.mjs';
 import {applyBatch} from './lib/batch.mjs';
+import {settings,suggestTags,previewClassification,applyClassification} from './lib/classify.mjs';
+import {purgeTrashed,recoverDeletions} from './lib/purge.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
 const data=path.resolve(process.env.PAPERDESK_DATA || path.join(os.homedir(),'PaperDeskData'));
@@ -23,6 +25,7 @@ if(fs.existsSync(dbPath)) {
   try{db=validateCatalog(JSON.parse(fs.readFileSync(dbPath,'utf8')));}
   catch(error){console.error(`无法读取文献库：${error.message}\n原文件未修改：${dbPath}\n请先保留原目录，再使用完整备份恢复到新目录。`);process.exit(1);}
 }
+try{if(!fs.existsSync(dbPath)&&fs.existsSync(path.join(data,'deletions'))&&fs.readdirSync(path.join(data,'deletions')).length)throw Error('书目丢失，不能判断清除是否完成');recoverDeletions(data,db);}catch(error){console.error('未完成的清除操作恢复失败，请保留数据目录：'+error.message);process.exit(1);}
 function commit(next) {
   const temp=dbPath+'.tmp';
   const fd=fs.openSync(temp,'w',0o600);
@@ -44,15 +47,29 @@ const server=http.createServer(async(req,res)=>{
     if(req.headers.host!==new URL(origin).host)fail(403,'访问地址不受支持');
     if(req.headers.origin && req.headers.origin!==origin)fail(403,'不允许跨站访问');
     const url=new URL(req.url,origin);
-    if(req.method==='GET'&&['/','/app.js','/style.css'].includes(url.pathname)){
+    if(req.method==='GET'&&['/','/app.js','/style.css','/classify.mjs'].includes(url.pathname)){
       const f=url.pathname==='/'?'index.html':url.pathname.slice(1);
-      let bytes=fs.readFileSync(path.join(root,'public',f));
+      let bytes=fs.readFileSync(f==='classify.mjs'?path.join(root,'lib','classify.mjs'):path.join(root,'public',f));
       if(f==='index.html')bytes=Buffer.from(bytes.toString().replace('__TOKEN__',token));
       res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'");
-      res.setHeader('Content-Type',f.endsWith('.js')?'text/javascript; charset=utf-8':f.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');return res.end(bytes);
+      res.setHeader('Content-Type',(f.endsWith('.js')||f.endsWith('.mjs'))?'text/javascript; charset=utf-8':f.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');return res.end(bytes);
     }
     if((req.headers['x-paperdesk-token']||url.searchParams.get('token'))!==token)fail(403,'请刷新页面后重试');
-    if(req.method==='GET'&&url.pathname==='/api/papers')return send({papers:db.papers,dataPath:data});
+    if(req.method==='GET'&&url.pathname==='/api/papers')return send({papers:db.papers,dataPath:data,classification:settings(db)});
+    if(req.method==='GET'&&url.pathname==='/api/classify/settings')return send(settings(db));
+    if(req.method==='POST'&&url.pathname==='/api/classify/preview'){
+      const request=await json(req);const suggestions=previewClassification(db,request?.rules);
+      return send({suggestions:suggestions.slice(0,500),total:suggestions.length});
+    }
+    if(req.method==='POST'&&url.pathname==='/api/classify/apply'){
+      const request=await json(req);const result=applyClassification(db,request);
+      commit(result.catalog);return send({papers:result.papers,count:result.papers.length,classification:settings(db)});
+    }
+    if(req.method==='POST'&&url.pathname==='/api/purge'){
+      const request=await json(req);
+      if(backupBusy)fail(409,'完整备份正在进行，请完成后再清除');
+      return send(purgeTrashed(data,db,request,commit));
+    }
     if(req.method==='POST'&&url.pathname==='/api/batch'){
       const request=await json(req);
       const result=applyBatch(db,request);
@@ -67,6 +84,7 @@ const server=http.createServer(async(req,res)=>{
       if(existing)return send({paper:existing,duplicate:true});
       const name=(url.searchParams.get('name')||'未命名.pdf').slice(0,500);
       const paper={id:randomUUID(),revision:1,hash,filename:name,title:name.replace(/\.pdf$/i,'').trim()||'未命名文献',authors:'',year:'',doi:'',journal:'',tags:[],notes:'',status:'unread',favorite:false,trashed:false,createdAt:new Date().toISOString(),size:bytes.length};
+      const config=settings(db);if(config.autoOnImport)paper.tags=suggestTags(paper,config.rules).map(m=>m.tag);
       fs.writeFileSync(path.join(data,'files',hash+'.pdf'),bytes,{mode:0o600});
       commit({...db,papers:[paper,...db.papers]});return send({paper,duplicate:false},201);
     }
@@ -94,6 +112,7 @@ const server=http.createServer(async(req,res)=>{
         const changes=await json(req);if(!changes||Array.isArray(changes)||typeof changes!=='object')fail(400,'请求格式错误');
         // The body may arrive slowly; read the latest record only after it is complete.
         paper=db.papers.find(p=>p.id===match[1]);
+        if(!paper)fail(409,'文献已被清除，请刷新列表');
         if(!Number.isSafeInteger(changes.expectedRevision))fail(428,'页面版本过旧，请刷新页面后再保存');
         if(changes.expectedRevision!==(paper.revision||0))fail(409,'此文献已在其他页面更新。你的草稿仍保留，请复制需要的内容，再重新载入最新版本。');
         const next={...paper};

@@ -173,3 +173,42 @@ test('批量更新与单篇保存竞争时不互相覆盖',async()=>{
     else{assert.equal(saved.every(p=>!p.favorite),true);assert.equal(saved.find(p=>p.id===ps[1].id).notes,'单篇保存');assert.equal(saved.find(p=>p.id===ps[0].id).revision,1);}
   }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
 });
+
+test('自动导入分类、规则预览应用、智能设置持久化',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-classify-api-'));let app;
+  try{
+    app=await start(dir);
+    const js=await fetch(app.base+'/classify.mjs');assert.match(js.headers.get('content-type'),/javascript/);assert.equal(js.status,200);
+    const auto=(await (await app.call('/api/import?name=UWB_localization_survey.pdf',{method:'POST',body:'%PDF-1.4\nauto classify\n%%EOF'})).json()).paper;
+    assert.ok(auto.tags.includes('定位与导航'));assert.ok(auto.tags.includes('综述'));
+    const rules=[{tag:'定位专题',keywords:['UWB']}];
+    const save=await app.call('/api/classify/apply',{method:'POST',body:JSON.stringify({items:[],rules,autoOnImport:false,expectedSettingsRevision:0})});assert.equal(save.status,200);
+    const manual=(await (await app.call('/api/import?name=UWB_manual.pdf',{method:'POST',body:'%PDF-1.4\nmanual classify\n%%EOF'})).json()).paper;assert.deepEqual(manual.tags,[]);
+    const preview=await (await app.call('/api/classify/preview',{method:'POST',body:JSON.stringify({rules})})).json();assert.equal(preview.total,2);
+    const selected=preview.suggestions.filter(p=>p.id===manual.id);
+    const applied=await app.call('/api/classify/apply',{method:'POST',body:JSON.stringify({items:selected,rules,autoOnImport:false,expectedSettingsRevision:1})});assert.equal(applied.status,200);
+    assert.deepEqual((await applied.json()).papers[0].tags,['定位专题']);
+    const stale=await app.call('/api/classify/apply',{method:'POST',body:JSON.stringify({items:[],rules:[],autoOnImport:true,expectedSettingsRevision:1})});assert.equal(stale.status,409);
+    await app.stop();app=await start(dir);
+    const stored=await (await app.call('/api/classify/settings')).json();assert.deepEqual(stored.rules,rules);assert.equal(stored.autoOnImport,false);assert.equal(stored.revision,2);
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});
+
+test('彻底清除接口校验确认文字和回收站状态，清除后可重新导入',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-purge-api-'));let app;
+  try{
+    app=await start(dir);const bytes='%PDF-1.4\npurge api\n%%EOF';
+    const p=(await (await app.call('/api/import',{method:'POST',body:bytes})).json()).paper;
+    const purge=(items,confirmation)=>app.call('/api/purge',{method:'POST',body:JSON.stringify({items,confirmation})});
+    assert.equal((await purge([{id:p.id,expectedRevision:1}],'永久删除 1 篇')).status,409);
+    await app.call('/api/papers/'+p.id,{method:'PATCH',body:JSON.stringify({trashed:true,expectedRevision:1})});
+    assert.equal((await purge([{id:p.id,expectedRevision:2}],'确定')).status,400);
+    assert.equal((await purge([{id:p.id,expectedRevision:1}],'永久删除 1 篇')).status,409);
+    const success=await purge([{id:p.id,expectedRevision:2}],'永久删除 1 篇');assert.equal(success.status,200);assert.equal((await success.json()).count,1);
+    assert.equal((await app.call('/api/papers/'+p.id+'/file')).status,404);
+    const again=(await (await app.call('/api/import',{method:'POST',body:bytes})).json());assert.equal(again.duplicate,false);assert.notEqual(again.paper.id,p.id);
+    await app.stop();app=await start(dir);
+    assert.equal((await (await app.call('/api/papers')).json()).papers.length,1);
+    assert.equal(await (await app.call('/api/papers/'+again.paper.id+'/file')).text(),bytes);
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});

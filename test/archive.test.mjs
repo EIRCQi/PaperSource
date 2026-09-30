@@ -20,14 +20,14 @@ async function fixture(){
 test('完整备份快照包含 PDF、笔记与回收站，恢复到独立目录',async()=>{
   const f=await fixture();
   try{
-    f.paper.trashed=true;
+    f.paper.trashed=true;f.catalog.classification={revision:2,autoOnImport:false,rules:[{tag:'自定义',keywords:['example']}]};
     const pending=createBackup(f.data,f.catalog);
     // A later edit does not change the snapshot being copied.
     f.paper.notes='稍后修改';
     const backup=await pending;
     const target=path.join(f.root,'restored');await restoreBackup(backup.path,target);
     const restored=JSON.parse(await fs.readFile(path.join(target,'catalog.json'),'utf8'));
-    assert.equal(restored.papers[0].notes,' 保留笔记\n');assert.equal(restored.papers[0].trashed,true);
+    assert.deepEqual(restored.classification,f.catalog.classification);assert.equal(restored.papers[0].notes,' 保留笔记\n');assert.equal(restored.papers[0].trashed,true);
     assert.deepEqual(await fs.readFile(path.join(target,'files',f.paper.hash+'.pdf')),f.bytes);
     await assert.rejects(fs.stat(path.join(target,'running.lock')),{code:'ENOENT'});
     await assert.rejects(restoreBackup(backup.path,target),{code:'EEXIST'});
