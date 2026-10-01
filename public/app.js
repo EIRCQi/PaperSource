@@ -6,6 +6,7 @@ const labels={all:'全部文献',favorite:'星标收藏',unread:'待阅读',read
 const states={unread:'待阅读',reading:'阅读中',done:'已读完'};
 let papers=[],view='all',tag='',selected=null,dirty=false,importing=false,saving=false,backingUp=false;
 let page=1,stopImport=false,draftPrefix='',draftWarning=false;
+let detailTab='reader',readerWide=false;
 const PAGE_SIZE=50;
 const searchIndex=new Map(),classSuggestions=new Map();
 let classification={revision:0,rules:DEFAULT_RULES,autoOnImport:true};
@@ -81,14 +82,39 @@ function renderList(){
   $('list').innerHTML=shown.length?visiblePage.map(p=>`<article class="paper-row"><label class="paper-pick"><input type="checkbox" data-pick="${p.id}" aria-label="选择 ${esc(p.title)}" ${picked.has(p.id)?'checked':''} ${saving?'disabled':''}></label><button class="paper ${selected===p.id?'selected':''}" data-id="${p.id}"><div class="paper-top"><span class="pdf">PDF</span><span>${esc(p.year)||'年份待补充'} ${p.favorite?'★':''}</span></div><h3>${esc(p.title)}</h3><p>${esc(p.authors)||'作者待补充'}</p><div class="paper-bottom"><span class="status ${p.status}">${states[p.status]}</span><span>${p.tags.slice(0,2).map(t=>'# '+esc(t)).join('　')}</span></div></button></article>`).join(''):`<div class="empty"><h3>${q?'没有找到匹配文献':view==='all'?'文献库还是空的':'这里还没有文献'}</h3><p>${q?'试试其他关键词。':'导入 PDF，或调整分类与阅读状态。'}</p></div>`;
   renderBulk();
 }
+function updateNoteCount(){if($('readingNotes'))$('noteCount').textContent=`${$('readingNotes').value.length.toLocaleString('zh-CN')} 字符`;}
+function showDetailTab(tab){
+  detailTab=tab;const reading=tab==='reader';
+  if(!$('readerPanel'))return;
+  $('readerPanel').hidden=!reading;$('metadataPanel').hidden=reading;
+  $('readerTab').setAttribute('aria-pressed',String(reading));$('metadataTab').setAttribute('aria-pressed',String(!reading));
+  document.querySelector('.workspace').classList.toggle('reader-open',reading);
+}
+function setReaderWide(wide){
+  readerWide=wide&&!!$('edit');const detail=$('detail');
+  detail.classList.toggle('reader-wide',readerWide);document.body.classList.toggle('reader-focused',readerWide);
+  document.querySelector('body>aside').inert=readerWide;
+  for(const child of document.querySelector('main').children)if(!child.contains(detail))child.inert=readerWide;
+  document.querySelector('.list-column').inert=readerWide;
+  if(readerWide){detail.setAttribute('role','dialog');detail.setAttribute('aria-modal','true');detail.setAttribute('aria-label','文献阅读工作区');}
+  else{detail.removeAttribute('role');detail.removeAttribute('aria-modal');detail.removeAttribute('aria-label');}
+  if($('wideReader')){$('wideReader').textContent=readerWide?'退出宽屏':'宽屏阅读';$('wideReader').setAttribute('aria-pressed',String(readerWide));}
+}
 function field(key,label,value,placeholder=''){return `<label>${label}<input name="${key}" value="${esc(value)}" placeholder="${esc(placeholder)}" ${key==='title'?'required':''} maxlength="2000"></label>`;}
 function renderDetail(){
-  let p=papers.find(p=>p.id===selected);if(!p){selected=null;dirty=false;$('detail').innerHTML=emptyDetail;return;}
+  let p=papers.find(p=>p.id===selected);if(!p){setReaderWide(false);selected=null;dirty=false;$('detail').innerHTML=emptyDetail;document.querySelector('.workspace').classList.remove('reader-open');return;}
   let editRevision=p.revision||0;
   dirty=false;
   const pdf=`/api/papers/${p.id}/file?token=${token}`;
-  $('detail').innerHTML=`<div class="detail-head"><span>文献详情</span><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div><form id="edit"><div class="paper-actions"><button id="trash" type="button" class="${p.trashed?'':'danger'}">${p.trashed?'恢复文献':'删除（移入回收站）'}</button>${p.trashed?'<button id="purgeSingle" type="button" class="danger">彻底删除此篇</button>':''}<span>${p.trashed?'彻底删除将清除库内副本和笔记，无法恢复。':'删除后可在左侧回收站恢复或彻底清除。'}</span></div><div class="metadata-bar"><button type="button" id="recognize">识别题录</button><span>${esc(p.metadata?.message||'可从 PDF 自动提取题录，结果需核对。')}</span></div><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('keywords','论文关键词',p.keywords||'','论文中的关键词，用分号分隔')}${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div><label>阅读笔记<textarea name="notes" rows="6" maxlength="100000" placeholder="研究问题、主要结论，以及你的思考…">${esc(p.notes)}</textarea></label><div class="save-row"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState">已保存</span><button type="button" id="reloadDetail">重新载入</button></div></form><details class="preview"><summary>展开 PDF 预览</summary><iframe title="PDF 文献预览" data-src="${pdf}"></iframe></details><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
+  $('detail').innerHTML=`<div class="detail-head"><strong id="readingTitle">${esc(p.title)}</strong><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div>
+    <div class="reader-toolbar"><div role="group" aria-label="文献视图"><button type="button" id="readerTab" aria-controls="readerPanel">阅读与笔记</button><button type="button" id="metadataTab" aria-controls="metadataPanel">题录整理</button></div><button type="button" id="wideReader">宽屏阅读</button></div>
+    <form id="edit"><div class="save-row reader-save"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState" role="status">已保存</span><button type="button" id="reloadDetail">重新载入</button><button id="trash" type="button" class="${p.trashed?'':'danger'}">${p.trashed?'恢复文献':'删除（移入回收站）'}</button>${p.trashed?'<button id="purgeSingle" type="button" class="danger">彻底删除此篇</button>':''}</div>
+    <section id="readerPanel" aria-label="阅读与笔记"><div class="reader-layout"><div class="pdf-pane"><iframe id="paperFrame" title="PDF 文献阅读" src="${pdf}"></iframe><p class="pdf-hint">无法显示 PDF？点击右上角“打开 PDF ↗”。</p></div><div class="notes-pane"><label for="readingNotes">阅读笔记 <span id="noteCount"></span></label><textarea id="readingNotes" name="notes" rows="12" maxlength="100000" placeholder="记录研究问题、主要方法、关键结论和自己的思考…">${esc(p.notes)}</textarea><p>切换视图会保留编辑内容；完成后点击上方保存修改。</p></div></div></section>
+    <section id="metadataPanel" aria-label="题录整理" hidden><div class="metadata-bar"><button type="button" id="recognize">识别题录</button><span>${esc(p.metadata?.message||'可从 PDF 自动提取题录，结果需核对。')}</span></div><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('keywords','论文关键词',p.keywords||'','论文中的关键词，用分号分隔')}${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div></section></form><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
   const form=$('edit');
+  $('readerTab').onclick=()=>showDetailTab('reader');$('metadataTab').onclick=()=>showDetailTab('metadata');
+  $('wideReader').onclick=()=>setReaderWide(!readerWide);
+  form.addEventListener('invalid',event=>{if($('metadataPanel').contains(event.target))showDetailTab('metadata');},true);
   if($('purgeSingle'))$('purgeSingle').onclick=()=>openPurge(false,{id:p.id,revision:editRevision});
   $('recognize').onclick=()=>recognizePaper(p,form,editRevision);
   const draft=readDraft(p.id);
@@ -101,8 +127,9 @@ function renderDetail(){
     editRevision=draft.revision;dirty=true;
     $('saveState').textContent=editRevision===(p.revision||0)?'已恢复未保存草稿':'草稿基于旧版本，请核对后重新载入';
   }
+  updateNoteCount();showDetailTab(detailTab);setReaderWide(readerWide);
   form.addEventListener('input',()=>{
-    dirty=true;const stored=storeDraft(p.id,editRevision,form);$('saveState').textContent=stored?'未保存 · 草稿已暂存':'未保存 · 请及时保存';
+    updateNoteCount();dirty=true;const stored=storeDraft(p.id,editRevision,form);$('saveState').textContent=stored?'未保存 · 草稿已暂存':'未保存 · 请及时保存';
   });
   form.addEventListener('submit',async e=>{
     e.preventDefault();if(saving)return;saving=true;
@@ -111,7 +138,7 @@ function renderDetail(){
     try{
       const updated=await api('/api/papers/'+p.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(changes)});
       dataGeneration++;papers=papers.map(x=>x.id===p.id?updated:x);p=updated;editRevision=updated.revision;if(picked.has(p.id))picked.set(p.id,updated.revision);
-      deleteDraft(p.id);dirty=false;$('saveState').textContent='已保存';rebuildIndex();renderList();toast('修改已保存');
+      deleteDraft(p.id);dirty=false;$('readingTitle').textContent=p.title;$('saveState').textContent='已保存';rebuildIndex();renderList();toast('修改已保存');
     }catch(e){$('saveState').textContent=e.message;toast(e.message);}
     finally{controls.forEach(c=>c.disabled=false);saving=false;renderBulk();}
   });
@@ -130,9 +157,9 @@ function renderDetail(){
     }catch(e){toast(e.message);}
     finally{saving=false;controls.forEach(c=>c.disabled=false);renderBulk();}
   };
-  document.querySelector('.preview').addEventListener('toggle',e=>{const frame=e.target.querySelector('iframe');if(e.target.open&&!frame.src)frame.src=frame.dataset.src;});
+
 }
-$('list').onclick=e=>{const b=e.target.closest('[data-id]');if(!b||saving||!canLeave())return;if(dirty&&selected)deleteDraft(selected);selected=b.dataset.id;renderList();renderDetail();};
+$('list').onclick=e=>{const b=e.target.closest('[data-id]');if(!b||saving||!canLeave())return;if(dirty&&selected)deleteDraft(selected);selected=b.dataset.id;detailTab='reader';renderList();renderDetail();$('detail').scrollIntoView({block:'start'});};
 $('list').onchange=e=>{
   const id=e.target.dataset.pick;if(!id)return;
   if(saving||importing||filtering){e.target.checked=picked.has(id);return;}
@@ -197,8 +224,16 @@ $('sort').onchange=()=>{page=1;renderList();};
 $('prevPage').onclick=()=>{page--;renderList();$('list').scrollTop=0;};
 $('nextPage').onclick=()=>{page++;renderList();$('list').scrollTop=0;};
 document.addEventListener('keydown',e=>{
+  if(readerWide&&!document.querySelector('dialog[open]')){
+    if(e.key==='Escape'){e.preventDefault();setReaderWide(false);$('wideReader')?.focus();}
+    if(e.key==='Tab'){
+      const targets=[...$('detail').querySelectorAll('button:not(:disabled),a[href],input:not(:disabled),textarea:not(:disabled),select:not(:disabled),iframe')].filter(el=>el.getClientRects().length);
+      if(e.shiftKey&&document.activeElement===targets[0]){e.preventDefault();targets.at(-1)?.focus();}
+      else if(!e.shiftKey&&document.activeElement===targets.at(-1)){e.preventDefault();targets[0]?.focus();}
+    }
+  }
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='s'){e.preventDefault();if(!saving&&!document.querySelector('dialog[open]')&&$('edit'))$('edit').requestSubmit();}
-  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();if(!document.querySelector('dialog[open]'))$('search').focus();}
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();if(!document.querySelector('dialog[open]')){setReaderWide(false);$('search').focus();}}
 });
 $('import').onclick=()=>$('files').click();$('folder').onclick=()=>$('folders').click();
 async function importFiles(files){

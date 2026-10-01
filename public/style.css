@@ -15,3 +15,18 @@
 .paper-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #e7ece8}.paper-actions span{font-size:12px;color:#74887b;line-height:1.6}.preset-controls{display:flex;gap:12px;align-items:end;flex-wrap:wrap}.preset-controls label{flex:1;min-width:180px}.preset-controls button{margin:0 0 2px}#classDialog{width:650px;max-width:calc(100vw - 32px);max-height:90vh;overflow:auto}
 
 #batchMetadataDialog{width:680px;max-width:calc(100vw - 32px);max-height:90vh;overflow:auto}.recognition-result{border:1px solid #dae3db;border-radius:10px;padding:14px;margin:12px 0}.recognition-result h3{font-size:15px;overflow-wrap:anywhere;margin:0}.recognition-result p{margin:8px 0}#batchMetadataError{color:#9e3d2c}#batchMetadataStatus{overflow-wrap:anywhere}
+
+/* Reading stays above bibliographic fields; the same form and iframe survive view switches. */
+.detail{min-width:0;container-type:inline-size;scroll-margin-top:16px}
+.detail-head{gap:16px;align-items:start;margin-bottom:14px}.detail-head>strong{font-size:15px;color:#334e40;overflow-wrap:anywhere;min-width:0}.detail-head>div{flex-shrink:0}
+.reader-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}.reader-toolbar [role=group]{display:flex;gap:6px}.reader-toolbar button[aria-pressed=true]{color:#1d654c;background:#e7f2eb;border-color:#9ec3ac}
+.reader-save{position:sticky;top:0;z-index:1;background:#fff;padding:10px 0 14px;align-items:center;margin-bottom:10px;border-bottom:1px solid #e7ece8}.reader-save #reloadDetail{margin-left:auto}
+.reader-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:18px}.pdf-pane,.notes-pane{min-width:0}.pdf-pane iframe{display:block;width:100%;height:clamp(400px,66vh,820px);border:1px solid #dfe6e1;border-radius:8px;background:#f2f4f3}.pdf-hint,.notes-pane p{font-size:11px;color:#7f9188;line-height:1.7;margin:8px 0}.notes-pane{display:flex;flex-direction:column}.notes-pane label{display:flex;justify-content:space-between;color:#446753;font-size:13px;margin:0}.notes-pane textarea{flex:1;min-height:220px;resize:vertical}.notes-pane #noteCount{font-size:11px;color:#87998c}
+.workspace.reader-open{grid-template-columns:minmax(220px,.5fr) minmax(0,1.8fr)}
+.reader-focused{overflow:hidden}.detail.reader-wide{position:fixed;inset:14px;z-index:10;overflow:auto;border-radius:14px;min-height:0;padding:22px 28px;box-shadow:0 0 0 30px #173c3160}.reader-wide .pdf-pane iframe{height:calc(100dvh - 260px);min-height:280px}.reader-wide .reader-toolbar{position:sticky;top:-22px;z-index:3;background:#fff;padding:12px 0;margin-bottom:0}.reader-wide .reader-save{top:38px;z-index:2}
+@container(min-width:740px){.reader-layout{grid-template-columns:minmax(0,2fr) minmax(250px,1fr)}.notes-pane textarea{resize:none}}
+@media(max-width:760px){.workspace.reader-open{display:block}.detail-head{flex-direction:column;gap:8px}.detail.reader-wide{inset:6px;padding:16px}.reader-wide .reader-toolbar{top:-16px}.reader-wide .reader-save{position:static}.reader-toolbar button{font-size:12px;padding:9px}.pdf-pane iframe{height:55vh;min-height:320px}.reader-wide .pdf-pane iframe{height:55dvh;min-height:320px}}
+/* Keep confirmation controls reachable even when the reading workspace locks body scrolling. */
+dialog{max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto}.dialog-actions{flex-wrap:wrap}
+
+.reader-save button{font-size:12px;padding:9px 11px}.reader-save{gap:10px}.reader-wide .reader-save{top:44px}
