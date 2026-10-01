@@ -243,3 +243,28 @@ test('自动题录导入、关键词分类、只读预览、版本保护、备�
     assert.equal((await broken.json()).paper.metadata.status,'failed');
   }finally{if(restored)await restored.stop();if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
 });
+
+test('批量题录 API 权限、并发冲突、关键词分类与重启持久化',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-bulk-metadata-'));let app;
+  try{
+    app=await start(dir);const ps=[];
+    for(let i=0;i<2;i++)ps.push((await (await app.call('/api/import?name=download.pdf',{method:'POST',body:'%PDF-1.4\nbulk metadata '+i})).json()).paper);
+    const items=ps.map(p=>({id:p.id,expectedRevision:1,fields:{title:'识别标题',authors:'张三',keywords:'genomics',doi:'10.1234/example'}}));
+    const send=request=>app.call('/api/metadata/apply',{method:'POST',body:JSON.stringify(request)});
+    assert.equal((await fetch(app.base+'/api/metadata/apply',{method:'POST',body:JSON.stringify({items})})).status,403);
+    const before=await readFile(join(dir,'catalog.json'),'utf8');
+    assert.equal((await send({items:[items[0],{...items[1],expectedRevision:0}]})).status,409);assert.equal(await readFile(join(dir,'catalog.json'),'utf8'),before);
+    const attempts=await Promise.all([send({items}),app.call('/api/papers/'+ps[1].id,{method:'PATCH',body:JSON.stringify({expectedRevision:1,notes:'并发笔记'})})]);
+    assert.deepEqual(attempts.map(r=>r.status).sort(),[200,409]);
+    let saved=(await (await app.call('/api/papers')).json()).papers;
+    if(attempts[0].status===409){assert.equal(saved.every(p=>!p.authors),true);assert.equal(saved.find(p=>p.id===ps[1].id).notes,'并发笔记');
+      const refreshed=items.map(item=>({...item,expectedRevision:saved.find(p=>p.id===item.id).revision}));assert.equal((await send({items:refreshed})).status,200);
+    }
+    saved=(await (await app.call('/api/papers')).json()).papers;assert.equal(saved.every(p=>p.authors==='张三'),true);
+    const overwrite=await send({items:[{id:ps[0].id,expectedRevision:saved.find(p=>p.id===ps[0].id).revision,fields:{authors:'不允许覆盖'}}]});assert.equal(overwrite.status,409);
+    const classification=await (await app.call('/api/classify/settings')).json();
+    const preview=await (await app.call('/api/classify/preview',{method:'POST',body:JSON.stringify({rules:classification.rules})})).json();assert.equal(preview.suggestions.filter(p=>p.matches.some(m=>m.tag==='生物学与生物信息')).length,2);
+    await app.stop();app=await start(dir);const restarted=(await (await app.call('/api/papers')).json()).papers;
+    assert.deepEqual(restarted,saved);
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});

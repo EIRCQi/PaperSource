@@ -11,6 +11,7 @@ import {applyBatch} from './lib/batch.mjs';
 import {settings,suggestTags,previewClassification,applyClassification} from './lib/classify.mjs';
 import {purgeTrashed,recoverDeletions} from './lib/purge.mjs';
 import {extractMetadata} from './lib/metadata.mjs';
+import {applyMetadataBatch} from './lib/metadata-batch.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
 const data=path.resolve(process.env.PAPERDESK_DATA || path.join(os.homedir(),'PaperDeskData'));
@@ -39,7 +40,7 @@ let origin;
 let backupBusy=false;
 function fail(status,message){throw Object.assign(new Error(message),{status});}
 async function body(req,max=1024*1024){let size=0;const parts=[];for await(const p of req){size+=p.length;if(size>max)fail(413,'文件过大，单个 PDF 最大 50 MB');parts.push(p);}return Buffer.concat(parts);}
-async function json(req){try{return JSON.parse((await body(req)).toString());}catch(e){if(e.status)throw e;fail(400,'请求格式错误');}}
+async function json(req,max=1024*1024){try{return JSON.parse((await body(req,max)).toString());}catch(e){if(e.status)throw e;fail(400,'请求格式错误');}}
 const server=http.createServer(async(req,res)=>{
   const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
@@ -48,9 +49,9 @@ const server=http.createServer(async(req,res)=>{
     if(req.headers.host!==new URL(origin).host)fail(403,'访问地址不受支持');
     if(req.headers.origin && req.headers.origin!==origin)fail(403,'不允许跨站访问');
     const url=new URL(req.url,origin);
-    if(req.method==='GET'&&['/','/app.js','/style.css','/classify.mjs'].includes(url.pathname)){
+    if(req.method==='GET'&&['/','/app.js','/style.css','/classify.mjs','/metadata-batch.mjs'].includes(url.pathname)){
       const f=url.pathname==='/'?'index.html':url.pathname.slice(1);
-      let bytes=fs.readFileSync(f==='classify.mjs'?path.join(root,'lib','classify.mjs'):path.join(root,'public',f));
+      let bytes=fs.readFileSync(['classify.mjs','metadata-batch.mjs'].includes(f)?path.join(root,'lib',f):path.join(root,'public',f));
       if(f==='index.html')bytes=Buffer.from(bytes.toString().replace('__TOKEN__',token));
       res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'");
       res.setHeader('Content-Type',(f.endsWith('.js')||f.endsWith('.mjs'))?'text/javascript; charset=utf-8':f.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');return res.end(bytes);
@@ -70,6 +71,11 @@ const server=http.createServer(async(req,res)=>{
       const request=await json(req);
       if(backupBusy)fail(409,'完整备份正在进行，请完成后再清除');
       return send(purgeTrashed(data,db,request,commit));
+    }
+    if(req.method==='POST'&&url.pathname==='/api/metadata/apply'){
+      const request=await json(req,2*1024*1024);
+      const result=applyMetadataBatch(db,request);commit(result.catalog);
+      return send({papers:result.papers,count:result.papers.length});
     }
     if(req.method==='POST'&&url.pathname==='/api/batch'){
       const request=await json(req);

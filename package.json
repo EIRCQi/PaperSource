@@ -1,6 +1,6 @@
 {
   "name": "paperdesk-local",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "文栖：本地中文文献管理器",

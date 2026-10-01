@@ -1,3 +1,4 @@
+import {METADATA_FIELDS,METADATA_BATCH_LIMIT,metadataSuggestions} from './metadata-batch.mjs';
 import {suggestTags,DEFAULT_RULES,validateRules,RULE_PRESETS,mergePresetRules} from './classify.mjs';
 const $=id=>document.getElementById(id);
 const token=document.querySelector('meta[name="app-token"]').content;
@@ -21,6 +22,7 @@ function renderBulk(){
   $('selectionCount').textContent=`已选 ${count} 篇`;
   $('clearSelection').disabled=saving||count===0;
   $('openBatch').disabled=saving||importing||filtering||count===0;
+  $('recognizeSelected').hidden=view==='trash';$('recognizeSelected').disabled=saving||importing||filtering||count===0;
   $('trashSelected').hidden=view==='trash';$('trashSelected').disabled=saving||importing||filtering||count===0;
   $('selectPage').disabled=saving||importing||filtering||visiblePage.length===0;
   document.querySelectorAll('[data-pick]').forEach(input=>input.disabled=saving||importing||filtering);
@@ -201,7 +203,7 @@ document.addEventListener('keydown',e=>{
 $('import').onclick=()=>$('files').click();$('folder').onclick=()=>$('folders').click();
 async function importFiles(files){
   if(importing){toast('正在导入，请稍候');return;}
-  if(saving||$('batchDialog').open||$('classDialog').open||$('purgeDialog').open||$('metadataDialog').open){toast('请先完成当前整理操作');return;}
+  if(saving||$('batchDialog').open||$('classDialog').open||$('purgeDialog').open||$('metadataDialog').open||$('batchMetadataDialog').open){toast('请先完成当前整理操作');return;}
   const pdfs=[...files].filter(f=>/\.pdf$/i.test(f.name));if(!pdfs.length){toast('没有找到 PDF 文件');return;}
   lastImported=[];$('showImported').hidden=true;importing=true;stopImport=false;$('stopImport').hidden=false;$('stopImport').disabled=false;$('progress').hidden=false;$('import').disabled=$('folder').disabled=true;renderBulk();
   let added=0,classified=0,recognized=0,needsMetadata=0,duplicates=0,trashDuplicates=0,processed=0,failed=[];
@@ -318,7 +320,7 @@ $('help').onclick=()=>$('helpDialog').showModal();$('closeHelp').onclick=()=>$('
 window.addEventListener('beforeunload',e=>{if(dirty||importing||saving||backingUp){e.preventDefault();e.returnValue='';}});
 load().catch(e=>toast('无法连接文栖：'+e.message));
 
-const metadataLabels={title:'标题',authors:'作者',keywords:'关键词',doi:'DOI',year:'发表年份',journal:'期刊 / 会议'};
+const metadataLabels=METADATA_FIELDS;
 let metadataContext=null;
 async function recognizePaper(p,form,revision){
   if(saving||importing){toast('请等待当前操作完成');return;}
@@ -351,4 +353,72 @@ $('applyMetadata').onclick=()=>{
   }
   context.form.dispatchEvent(new Event('input',{bubbles:true}));
   $('metadataDialog').close();metadataContext=null;toast('已填入编辑框，请核对并点击“保存修改”');
+};
+
+let recognitionItems=[],recognitionRows=[],recognitionStop=false,recognitionRunning=false;
+function batchMetadataSelection(){
+  const items=[];
+  for(const [index,row] of recognitionRows.entries()){
+    const fields={};
+    for(const input of document.querySelectorAll(`[data-recognition-row="${index}"]:checked`))fields[input.dataset.field]=row.fields[input.dataset.field];
+    if(Object.keys(fields).length)items.push({id:row.id,expectedRevision:row.expectedRevision,fields});
+  }
+  return items;
+}
+function refreshMetadataApply(){
+  const items=batchMetadataSelection();$('applyBatchMetadata').disabled=saving||recognitionRunning||!items.length;
+  $('applyBatchMetadata').textContent=items.length?`保存 ${items.length} 篇的勾选题录`:'保存勾选的题录';
+}
+function renderRecognitionRows(){
+  $('batchMetadataResults').innerHTML=recognitionRows.map((row,index)=>`<section class="recognition-result"><h3>${esc(row.title)}</h3><p>${esc(row.message)}</p>${Object.entries(row.fields).map(([key,value])=>`<label class="metadata-choice"><input type="checkbox" data-recognition-row="${index}" data-field="${key}" checked ${recognitionRunning?'disabled':''}><span><strong>${esc(METADATA_FIELDS[key])}</strong><b>${esc(value)}</b><small>${esc(row.sources?.[key]||'PDF 题录候选，请核对')}</small></span></label>`).join('')}</section>`).join('');
+  refreshMetadataApply();
+}
+$('recognizeSelected').onclick=()=>{
+  if(saving||importing||filtering||!picked.size)return;
+  if(dirty){toast('请先保存当前编辑，再批量识别题录');return;}
+  if(picked.size>METADATA_BATCH_LIMIT){toast('批量识别每次最多 100 篇，请减少选择');return;}
+  recognitionItems=papers.filter(p=>picked.has(p.id)&&!p.trashed).map(p=>({...p,expectedRevision:picked.get(p.id)}));
+  if(!recognitionItems.length)return;
+  recognitionRows=[];recognitionStop=false;$('batchMetadataResults').innerHTML='';$('batchMetadataError').hidden=true;
+  $('batchMetadataStatus').textContent=`已选 ${recognitionItems.length} 篇。点击开始后逐篇识别，预览阶段不会修改文献。`;
+  $('startBatchMetadata').hidden=false;$('startBatchMetadata').disabled=false;$('stopBatchMetadata').hidden=true;refreshMetadataApply();$('batchMetadataDialog').showModal();
+};
+$('startBatchMetadata').onclick=async()=>{
+  if(saving||recognitionRunning)return;
+  recognitionRunning=true;saving=true;recognitionStop=false;recognitionRows=[];editorEnabled(false);renderBulk();
+  $('startBatchMetadata').hidden=true;$('stopBatchMetadata').hidden=false;$('stopBatchMetadata').disabled=false;$('closeBatchMetadata').disabled=true;$('batchMetadataError').hidden=true;
+  try{
+    for(const paper of recognitionItems){
+      if(recognitionStop)break;
+      $('batchMetadataStatus').textContent=`正在识别 ${recognitionRows.length+1} / ${recognitionItems.length}：${paper.title}`;
+      let row={id:paper.id,title:paper.title,expectedRevision:paper.expectedRevision,fields:{},message:''};
+      try{
+        const result=await api('/api/papers/'+paper.id+'/metadata',{method:'POST'});
+        if(result.expectedRevision!==paper.expectedRevision)throw Error('文献已变化，本篇跳过；请刷新列表后重试。');
+        row.fields=metadataSuggestions(paper,result.fields);row.sources=result.sources;
+        row.message=Object.keys(row.fields).length?'勾选需要补全的字段。':result.status==='recognized'?'已有题录保留，本篇没有可补全的空字段。':result.message;
+      }catch(error){row.message=error.message;}
+      recognitionRows.push(row);renderRecognitionRows();
+    }
+  }finally{
+    recognitionRunning=false;saving=false;editorEnabled(true);renderBulk();$('stopBatchMetadata').hidden=true;$('closeBatchMetadata').disabled=false;
+    const ready=recognitionRows.filter(r=>Object.keys(r.fields).length).length;
+    $('batchMetadataStatus').textContent=`${recognitionStop?'已停止':'识别完成'}：已处理 ${recognitionRows.length} / ${recognitionItems.length} 篇，可补全 ${ready} 篇，跳过 ${recognitionRows.length-ready} 篇，未处理 ${recognitionItems.length-recognitionRows.length} 篇。尚未保存；请核对下方候选。`;
+    renderRecognitionRows();
+  }
+};
+$('stopBatchMetadata').onclick=()=>{recognitionStop=true;$('stopBatchMetadata').disabled=true;$('batchMetadataStatus').textContent+=' 当前文献完成后停止。';};
+$('batchMetadataResults').onchange=refreshMetadataApply;
+$('batchMetadataDialog').addEventListener('cancel',e=>{if(saving||recognitionRunning)e.preventDefault();});
+$('closeBatchMetadata').onclick=()=>{if(!saving&&!recognitionRunning)$('batchMetadataDialog').close();};
+$('applyBatchMetadata').onclick=async()=>{
+  if(saving||recognitionRunning)return;const items=batchMetadataSelection();if(!items.length)return;
+  saving=true;editorEnabled(false);refreshMetadataApply();$('closeBatchMetadata').disabled=true;$('batchMetadataError').hidden=true;
+  const checkboxes=[...document.querySelectorAll('[data-recognition-row]')];checkboxes.forEach(e=>e.disabled=true);
+  try{
+    const result=await api('/api/metadata/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})});
+    dataGeneration++;const changed=new Map(result.papers.map(p=>[p.id,p]));papers=papers.map(p=>changed.get(p.id)||p);clearSelection();rebuildIndex();
+    if(changed.has(selected))renderDetail();$('batchMetadataDialog').close();toast(`已补全 ${result.count} 篇题录，可在“自动分类”预览新的分类建议`);
+  }catch(error){$('batchMetadataError').textContent=error.message;$('batchMetadataError').hidden=false;}
+  finally{saving=false;editorEnabled(true);checkboxes.forEach(e=>e.disabled=false);$('closeBatchMetadata').disabled=false;refreshMetadataApply();renderList();}
 };
