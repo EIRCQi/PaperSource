@@ -31,3 +31,22 @@ test('分类规则和文献冲突不部分应用',()=>{
   const saved=applyClassification(catalog,{...request,items:[]});assert.equal(saved.papers.length,0);assert.equal(saved.catalog.classification.autoOnImport,false);
   for(const rules of [null,[{tag:'重复',keywords:['a']},{tag:'重复',keywords:['b']}],[{tag:'x',keywords:[]}],[{tag:'x',keywords:['a,b']}],Array(41).fill({tag:'x',keywords:['a']})])assert.throws(()=>validateRules(rules),{status:400});
 });
+
+test('32 类预设覆盖多学科，关键词参与分类且不误配普通词',()=>{
+  assert.equal(DEFAULT_RULES.length,32);validateRules(DEFAULT_RULES);
+  const examples=[['自然语言处理','sentiment analysis'],['网络安全与隐私','differential privacy'],['物联网与传感器','传感网络'],['生物学与生物信息','genomics'],['材料科学','纳米材料'],['经济与金融','econometrics'],['教育与心理','psychology'],['统计与研究方法','causal inference']];
+  for(const [tag,keywords] of examples)assert.ok(suggestTags(paper({title:'研究结果',filename:'paper.pdf',keywords}),DEFAULT_RULES).some(r=>r.tag===tag),tag);
+  assert.deepEqual(suggestTags(paper({title:'ordinary methods and results',filename:'paper.pdf'}),DEFAULT_RULES),[]);
+});
+
+test('追加预设保留同名自定义规则，重复追加幂等，超限不部分修改',async()=>{
+  const {mergePresetRules,RULE_PRESETS}=await import('../lib/classify.mjs');
+  const original=[{tag:'机器学习',keywords:['我自己的关键词']},{tag:'个人专题',keywords:['my project']}],snapshot=structuredClone(original);
+  const result=mergePresetRules(original,'全部预设');assert.equal(result.added,31);assert.equal(result.rules.length,33);
+  assert.deepEqual(result.rules[0],original[0]);assert.deepEqual(original,snapshot);
+  assert.equal(mergePresetRules(result.rules,'全部预设').added,0);
+  for(const p of RULE_PRESETS)assert.equal(mergePresetRules([],p.name).rules.length,p.tags.length);
+  const full=Array.from({length:40},(_,i)=>({tag:'自定义'+i,keywords:['private topic']}));const before=structuredClone(full);
+  assert.throws(()=>mergePresetRules(full,'全部预设'),{status:400});assert.deepEqual(full,before);
+  assert.throws(()=>mergePresetRules(original,'不存在的组'),{status:400});
+});

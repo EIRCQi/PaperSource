@@ -1,4 +1,4 @@
-import {suggestTags,DEFAULT_RULES,validateRules} from './classify.mjs';
+import {suggestTags,DEFAULT_RULES,validateRules,RULE_PRESETS,mergePresetRules} from './classify.mjs';
 const $=id=>document.getElementById(id);
 const token=document.querySelector('meta[name="app-token"]').content;
 const labels={all:'全部文献',favorite:'星标收藏',unread:'待阅读',reading:'阅读中',done:'已读完',trash:'回收站',tag:'标签分类',recent:'本次新增',uncategorized:'未分类',incomplete:'资料待补全',suggested:'有分类建议'};
@@ -21,6 +21,7 @@ function renderBulk(){
   $('selectionCount').textContent=`已选 ${count} 篇`;
   $('clearSelection').disabled=saving||count===0;
   $('openBatch').disabled=saving||importing||filtering||count===0;
+  $('trashSelected').hidden=view==='trash';$('trashSelected').disabled=saving||importing||filtering||count===0;
   $('selectPage').disabled=saving||importing||filtering||visiblePage.length===0;
   document.querySelectorAll('[data-pick]').forEach(input=>input.disabled=saving||importing||filtering);
   const selectedOnPage=visiblePage.filter(p=>picked.has(p.id)).length;
@@ -84,8 +85,9 @@ function renderDetail(){
   let editRevision=p.revision||0;
   dirty=false;
   const pdf=`/api/papers/${p.id}/file?token=${token}`;
-  $('detail').innerHTML=`<div class="detail-head"><span>文献详情</span><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div><form id="edit"><div class="metadata-bar"><button type="button" id="recognize">识别题录</button><span>${esc(p.metadata?.message||'可从 PDF 自动提取题录，结果需核对。')}</span></div><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('keywords','论文关键词',p.keywords||'','论文中的关键词，用分号分隔')}${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div><label>阅读笔记<textarea name="notes" rows="6" maxlength="100000" placeholder="研究问题、主要结论，以及你的思考…">${esc(p.notes)}</textarea></label><div class="save-row"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState">已保存</span><button type="button" id="reloadDetail">重新载入</button><button class="subtle" id="trash" type="button">${p.trashed?'恢复文献':'移入回收站'}</button></div></form><details class="preview"><summary>展开 PDF 预览</summary><iframe title="PDF 文献预览" data-src="${pdf}"></iframe></details><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
+  $('detail').innerHTML=`<div class="detail-head"><span>文献详情</span><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div><form id="edit"><div class="paper-actions"><button id="trash" type="button" class="${p.trashed?'':'danger'}">${p.trashed?'恢复文献':'删除（移入回收站）'}</button>${p.trashed?'<button id="purgeSingle" type="button" class="danger">彻底删除此篇</button>':''}<span>${p.trashed?'彻底删除将清除库内副本和笔记，无法恢复。':'删除后可在左侧回收站恢复或彻底清除。'}</span></div><div class="metadata-bar"><button type="button" id="recognize">识别题录</button><span>${esc(p.metadata?.message||'可从 PDF 自动提取题录，结果需核对。')}</span></div><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('keywords','论文关键词',p.keywords||'','论文中的关键词，用分号分隔')}${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div><label>阅读笔记<textarea name="notes" rows="6" maxlength="100000" placeholder="研究问题、主要结论，以及你的思考…">${esc(p.notes)}</textarea></label><div class="save-row"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState">已保存</span><button type="button" id="reloadDetail">重新载入</button></div></form><details class="preview"><summary>展开 PDF 预览</summary><iframe title="PDF 文献预览" data-src="${pdf}"></iframe></details><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
   const form=$('edit');
+  if($('purgeSingle'))$('purgeSingle').onclick=()=>openPurge(false,{id:p.id,revision:editRevision});
   $('recognize').onclick=()=>recognizePaper(p,form,editRevision);
   const draft=readDraft(p.id);
   if(draft&&draft.values&&Number.isSafeInteger(draft.revision)){
@@ -157,6 +159,10 @@ $('openBatch').onclick=()=>{
   for(const option of $('batchAction').options)option.disabled=inTrash?option.value!=='restore':option.value==='restore';
   $('batchAction').value=inTrash?'restore':'status';
   $('batchError').hidden=true;batchFields();$('batchDialog').showModal();
+};
+$('trashSelected').onclick=()=>{
+  if(saving||importing||filtering||!picked.size||view==='trash')return;
+  $('openBatch').click();if($('batchDialog').open){$('batchAction').value='trash';batchFields();}
 };
 $('batchAction').onchange=batchFields;
 $('cancelBatch').onclick=()=>{if(!saving)$('batchDialog').close();};
@@ -249,6 +255,16 @@ $('classify').onclick=async()=>{
     $('classDialog').showModal();
   }catch(e){toast(e.message);}finally{saving=false;editorEnabled(true);renderBulk();refreshClassButton();}
 };
+$('rulePreset').innerHTML=RULE_PRESETS.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}（${p.tags.length} 类）</option>`).join('');
+$('addPreset').onclick=()=>{
+  if(saving)return;
+  try{
+    const result=mergePresetRules(readRules(),$('rulePreset').value);
+    $('classRules').value=result.rules.map(r=>r.tag+' = '+r.keywords.join(', ')).join('\n');
+    $('classRules').dispatchEvent(new Event('input'));$('classError').hidden=true;
+    $('classSummary').textContent=`已补充 ${result.added} 条，共 ${result.rules.length} 条。同名规则保持原样；预览后应用，或点击“仅保存规则”。`;
+  }catch(error){$('classError').textContent=error.message;$('classError').hidden=false;}
+};
 $('classRules').oninput=()=>{classPreview=[];$('classResults').innerHTML='';$('classSummary').textContent='规则已变化，请重新预览。';refreshClassButton();};
 $('classResults').onchange=refreshClassButton;
 $('classForm').onsubmit=async e=>{
@@ -276,13 +292,13 @@ $('applyClass').onclick=()=>saveClassification(true);
 $('saveClassRules').onclick=()=>saveClassification(false);
 $('closeClass').onclick=()=>{if(!saving)$('classDialog').close();};
 $('classDialog').addEventListener('cancel',e=>{if(saving)e.preventDefault();});
-function openPurge(all){
+function openPurge(all,single=null){
   if(saving||importing||backingUp)return;if(dirty){toast('请先保存当前编辑');return;}
-  const chosen=papers.filter(p=>p.trashed&&(all||picked.has(p.id)));
+  const chosen=papers.filter(p=>p.trashed&&(single?p.id===single.id:all||picked.has(p.id)));
   if(!chosen.length){toast('没有可清除的文献');return;}
   if(chosen.length>10000){toast('每次最多清除 10000 篇，请使用勾选删除分批处理');return;}
-  purgeItems=chosen.map(p=>({id:p.id,expectedRevision:all?p.revision||0:picked.get(p.id)}));
-  $('purgeSummary').textContent=`${all?'整个回收站（包括搜索或筛选外的文献）':'勾选的回收站文献'}：${chosen.length} 篇。${chosen.slice(0,3).map(p=>p.title).join('、')}${chosen.length>3?'…':''}`;
+  purgeItems=chosen.map(p=>({id:p.id,expectedRevision:single?single.revision:all?p.revision||0:picked.get(p.id)}));
+  $('purgeSummary').textContent=`${single?'当前这篇文献':all?'整个回收站（包括搜索或筛选外的文献）':'勾选的回收站文献'}：${chosen.length} 篇。${chosen.slice(0,3).map(p=>p.title).join('、')}${chosen.length>3?'…':''}`;
   $('purgePhrase').textContent=`永久删除 ${chosen.length} 篇`;$('purgeConfirm').value='';$('confirmPurge').disabled=true;$('purgeError').hidden=true;$('purgeDialog').showModal();
 }
 $('emptyTrash').onclick=()=>openPurge(true);$('purgePicked').onclick=()=>openPurge(false);
