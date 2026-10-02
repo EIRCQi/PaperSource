@@ -49,12 +49,22 @@ const server=http.createServer(async(req,res)=>{
     if(req.headers.host!==new URL(origin).host)fail(403,'访问地址不受支持');
     if(req.headers.origin && req.headers.origin!==origin)fail(403,'不允许跨站访问');
     const url=new URL(req.url,origin);
-    if(req.method==='GET'&&['/','/app.js','/style.css','/classify.mjs','/metadata-batch.mjs'].includes(url.pathname)){
+    if(req.method==='GET'&&['/','/app.js','/style.css','/classify.mjs','/metadata-batch.mjs','/reader.html','/reader.js','/reader.css','/notes.mjs'].includes(url.pathname)){
       const f=url.pathname==='/'?'index.html':url.pathname.slice(1);
       let bytes=fs.readFileSync(['classify.mjs','metadata-batch.mjs'].includes(f)?path.join(root,'lib',f):path.join(root,'public',f));
       if(f==='index.html')bytes=Buffer.from(bytes.toString().replace('__TOKEN__',token));
-      res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'");
+      res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; frame-src 'self'; worker-src 'self'; font-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'");
       res.setHeader('Content-Type',(f.endsWith('.js')||f.endsWith('.mjs'))?'text/javascript; charset=utf-8':f.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');return res.end(bytes);
+    }
+    if(req.method==='GET'&&url.pathname.startsWith('/pdf-assets/')){
+      const fixed={'/pdf-assets/pdf.mjs':'legacy/build/pdf.mjs','/pdf-assets/pdf.worker.mjs':'legacy/build/pdf.worker.mjs','/pdf-assets/viewer.css':'web/pdf_viewer.css','/pdf-assets/wasm/openjpeg_nowasm_fallback.js':'wasm/openjpeg_nowasm_fallback.js','/pdf-assets/wasm/jbig2_nowasm_fallback.js':'wasm/jbig2_nowasm_fallback.js'};
+      const support=/^\/pdf-assets\/(cmaps|standard_fonts)\/([A-Za-z0-9_.-]+)$/.exec(url.pathname);
+      const relative=fixed[url.pathname]||(support?`${support[1]}/${support[2]}`:null);
+      if(!relative)fail(404,'阅读器资源不存在');
+      const file=path.join(root,'node_modules','pdfjs-dist',relative);
+      if(!fs.existsSync(file)||!fs.statSync(file).isFile())fail(404,'阅读器组件缺失，请运行 npm ci 后重启');
+      res.setHeader('Content-Type',(relative.endsWith('.mjs')||relative.endsWith('.js'))?'text/javascript; charset=utf-8':relative.endsWith('.css')?'text/css; charset=utf-8':'application/octet-stream');
+      const stream=fs.createReadStream(file);stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());return stream.pipe(res);
     }
     if((req.headers['x-paperdesk-token']||url.searchParams.get('token'))!==token)fail(403,'请刷新页面后重试');
     if(req.method==='GET'&&url.pathname==='/api/papers')return send({papers:db.papers,dataPath:data,classification:settings(db)});

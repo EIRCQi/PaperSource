@@ -268,3 +268,20 @@ test('批量题录 API 权限、并发冲突、关键词分类与重启持久化
     assert.deepEqual(restarted,saved);
   }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
 });
+
+test('内置阅读器资源可读取，PDF 访问仍需令牌且资源路径受限',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'paperdesk-viewer-'));let app;
+  try{
+    app=await start(dir);
+    for(const file of ['/reader.html','/reader.js','/reader.css','/notes.mjs','/pdf-assets/pdf.mjs','/pdf-assets/pdf.worker.mjs','/pdf-assets/viewer.css','/pdf-assets/wasm/openjpeg_nowasm_fallback.js','/pdf-assets/wasm/jbig2_nowasm_fallback.js','/pdf-assets/cmaps/UniGB-UCS2-H.bcmap','/pdf-assets/standard_fonts/LiberationSans-Regular.ttf']){
+      const r=await fetch(app.base+file);assert.equal(r.status,200,file);assert.ok((await r.arrayBuffer()).byteLength>0);
+    }
+    assert.match((await fetch(app.base+'/reader.html')).headers.get('content-security-policy'),/worker-src 'self'/);
+    const r=await fetch(app.base+'/pdf-assets/pdf.worker.mjs');assert.match(r.headers.get('content-type'),/javascript/);await r.arrayBuffer();
+    for(const path of ['/pdf-assets/unknown.mjs','/pdf-assets/cmaps/%2e%2e%2f%2e%2e%2fpackage.json','/pdf-assets/standard_fonts/..%2F..%2Fpackage.json'])assert.equal((await fetch(app.base+path)).status,404);
+    const {samplePdf}=await import('../fixtures/pdf.mjs');const bytes=samplePdf({extraPages:[[['Second Page',20],['A second page of text.',12]]]});
+    const p=(await (await app.call('/api/import',{method:'POST',body:bytes})).json()).paper;
+    assert.equal((await fetch(app.base+'/api/papers/'+p.id+'/file')).status,403);
+    assert.deepEqual(Buffer.from(await (await app.call('/api/papers/'+p.id+'/file')).arrayBuffer()),bytes);
+  }finally{if(app)await app.stop();await rm(dir,{recursive:true,force:true});}
+});

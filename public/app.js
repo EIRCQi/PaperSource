@@ -1,3 +1,4 @@
+import {NOTE_TEMPLATES,appendTemplate,notePages} from './notes.mjs';
 import {METADATA_FIELDS,METADATA_BATCH_LIMIT,metadataSuggestions} from './metadata-batch.mjs';
 import {suggestTags,DEFAULT_RULES,validateRules,RULE_PRESETS,mergePresetRules} from './classify.mjs';
 const $=id=>document.getElementById(id);
@@ -6,7 +7,7 @@ const labels={all:'全部文献',favorite:'星标收藏',unread:'待阅读',read
 const states={unread:'待阅读',reading:'阅读中',done:'已读完'};
 let papers=[],view='all',tag='',selected=null,dirty=false,importing=false,saving=false,backingUp=false;
 let page=1,stopImport=false,draftPrefix='',draftWarning=false;
-let detailTab='reader',readerWide=false;
+let detailTab='reader',readerWide=false,readerPosition=null;
 const PAGE_SIZE=50;
 const searchIndex=new Map(),classSuggestions=new Map();
 let classification={revision:0,rules:DEFAULT_RULES,autoOnImport:true};
@@ -16,6 +17,7 @@ const picked=new Map();
 let visiblePage=[],lastImported=[],dataGeneration=0,filtering=false;
 function renderBulk(){
   const count=picked.size;
+  if($('insertPageNote'))$('insertPageNote').disabled=saving||!readerPosition;
   $('trashActions').hidden=view!=='trash';
   $('purgePicked').disabled=saving||importing||backingUp||!count;
   $('emptyTrash').disabled=saving||importing||backingUp||!papers.some(p=>p.trashed);
@@ -82,7 +84,12 @@ function renderList(){
   $('list').innerHTML=shown.length?visiblePage.map(p=>`<article class="paper-row"><label class="paper-pick"><input type="checkbox" data-pick="${p.id}" aria-label="选择 ${esc(p.title)}" ${picked.has(p.id)?'checked':''} ${saving?'disabled':''}></label><button class="paper ${selected===p.id?'selected':''}" data-id="${p.id}"><div class="paper-top"><span class="pdf">PDF</span><span>${esc(p.year)||'年份待补充'} ${p.favorite?'★':''}</span></div><h3>${esc(p.title)}</h3><p>${esc(p.authors)||'作者待补充'}</p><div class="paper-bottom"><span class="status ${p.status}">${states[p.status]}</span><span>${p.tags.slice(0,2).map(t=>'# '+esc(t)).join('　')}</span></div></button></article>`).join(''):`<div class="empty"><h3>${q?'没有找到匹配文献':view==='all'?'文献库还是空的':'这里还没有文献'}</h3><p>${q?'试试其他关键词。':'导入 PDF，或调整分类与阅读状态。'}</p></div>`;
   renderBulk();
 }
-function updateNoteCount(){if($('readingNotes'))$('noteCount').textContent=`${$('readingNotes').value.length.toLocaleString('zh-CN')} 字符`;}
+function updateNoteCount(){
+  if(!$('readingNotes'))return;
+  const notes=$('readingNotes').value;
+  $('noteCount').textContent=`${notes.length.toLocaleString('zh-CN')} 字符`;
+  $('noteReferences').innerHTML=notePages(notes).map(page=>`<button type="button" data-note-page="${page}">第 ${page} 页 ↗</button>`).join('');
+}
 function showDetailTab(tab){
   detailTab=tab;const reading=tab==='reader';
   if(!$('readerPanel'))return;
@@ -106,14 +113,33 @@ function renderDetail(){
   let editRevision=p.revision||0;
   dirty=false;
   const pdf=`/api/papers/${p.id}/file?token=${token}`;
+  readerPosition=null;
   $('detail').innerHTML=`<div class="detail-head"><strong id="readingTitle">${esc(p.title)}</strong><div>${p.trashed?'':`<a href="/api/export.bib?id=${p.id}&token=${token}" download>导出 BibTeX</a>　`}<a href="${pdf}" target="_blank" rel="noopener">打开 PDF ↗</a></div></div>
     <div class="reader-toolbar"><div role="group" aria-label="文献视图"><button type="button" id="readerTab" aria-controls="readerPanel">阅读与笔记</button><button type="button" id="metadataTab" aria-controls="metadataPanel">题录整理</button></div><button type="button" id="wideReader">宽屏阅读</button></div>
     <form id="edit"><div class="save-row reader-save"><button class="primary" type="submit" id="save">保存修改</button><span id="saveState" role="status">已保存</span><button type="button" id="reloadDetail">重新载入</button><button id="trash" type="button" class="${p.trashed?'':'danger'}">${p.trashed?'恢复文献':'删除（移入回收站）'}</button>${p.trashed?'<button id="purgeSingle" type="button" class="danger">彻底删除此篇</button>':''}</div>
-    <section id="readerPanel" aria-label="阅读与笔记"><div class="reader-layout"><div class="pdf-pane"><iframe id="paperFrame" title="PDF 文献阅读" src="${pdf}"></iframe><p class="pdf-hint">无法显示 PDF？点击右上角“打开 PDF ↗”。</p></div><div class="notes-pane"><label for="readingNotes">阅读笔记 <span id="noteCount"></span></label><textarea id="readingNotes" name="notes" rows="12" maxlength="100000" placeholder="记录研究问题、主要方法、关键结论和自己的思考…">${esc(p.notes)}</textarea><p>切换视图会保留编辑内容；完成后点击上方保存修改。</p></div></div></section>
+    <section id="readerPanel" aria-label="阅读与笔记"><div class="reader-layout"><div class="pdf-pane"><iframe id="paperFrame" title="PDF 文献阅读" src="/reader.html?id=${p.id}&token=${token}"></iframe><p class="pdf-hint">无法显示 PDF？点击右上角“打开 PDF ↗”。</p></div><div class="notes-pane"><label for="readingNotes">阅读笔记 <span id="noteCount"></span></label><div class="note-tools"><button type="button" id="insertPageNote" disabled>插入当前页码</button><span id="readingPosition" role="status">正在读取 PDF…</span></div><div class="note-tools"><select id="noteTemplate" aria-label="笔记模板">${Object.entries(NOTE_TEMPLATES).map(([key,t])=>`<option value="${key}">${esc(t.label)}</option>`).join('')}</select><button type="button" id="appendTemplate">追加模板</button></div><div id="noteReferences" class="note-tools" aria-label="笔记页码跳转"></div><textarea id="readingNotes" name="notes" rows="12" maxlength="100000" placeholder="记录研究问题、主要方法、关键结论和自己的思考…">${esc(p.notes)}</textarea><p>切换视图会保留编辑内容；完成后点击上方保存修改。</p></div></div></section>
     <section id="metadataPanel" aria-label="题录整理" hidden><div class="metadata-bar"><button type="button" id="recognize">识别题录</button><span>${esc(p.metadata?.message||'可从 PDF 自动提取题录，结果需核对。')}</span></div><div class="form-title">${field('title','文献标题',p.title)}</div><div class="grid">${field('authors','作者',p.authors,'多位作者用分号分隔')}${field('year','发表年份',p.year,'例如：2026')}${field('journal','期刊 / 会议',p.journal)}${field('doi','DOI',p.doi)}</div>${field('keywords','论文关键词',p.keywords||'','论文中的关键词，用分号分隔')}${field('tags','标签',p.tags.join('，'),'用逗号分隔，例如：机器学习，待读综述')}<div class="status-row"><label>阅读状态<select name="status">${Object.entries(states).map(([k,v])=>`<option value="${k}" ${p.status===k?'selected':''}>${v}</option>`).join('')}</select></label><label class="checkbox"><input type="checkbox" name="favorite" ${p.favorite?'checked':''}> 星标收藏</label></div></section></form><p class="file-meta">${esc(p.filename)} · ${(p.size/1024/1024).toFixed(2)} MB · ${new Date(p.createdAt).toLocaleDateString('zh-CN')} 导入</p>`;
   const form=$('edit');
   $('readerTab').onclick=()=>showDetailTab('reader');$('metadataTab').onclick=()=>showDetailTab('metadata');
   $('wideReader').onclick=()=>setReaderWide(!readerWide);
+  $('appendTemplate').onclick=()=>{
+    if(saving)return;
+    const notes=$('readingNotes');
+    try{notes.value=appendTemplate(notes.value,$('noteTemplate').value);notes.dispatchEvent(new Event('input',{bubbles:true}));notes.focus();notes.setSelectionRange(notes.value.length,notes.value.length);}catch(error){toast(error.message);}
+  };
+  $('noteReferences').onclick=event=>{
+    const button=event.target.closest('[data-note-page]');if(!button||saving)return;
+    const page=Number(button.dataset.notePage);
+    if(!readerPosition){toast('请等待 PDF 页面载入后再跳转');return;}
+    if(page>readerPosition.total){toast(`此文献只有 ${readerPosition.total} 页`);return;}
+    $('paperFrame').contentWindow.postMessage({type:'reader-jump',id:p.id,page},location.origin);
+  };
+  $('insertPageNote').onclick=()=>{
+    if(saving||!readerPosition||readerPosition.id!==p.id)return;
+    const notes=$('readingNotes'),marker=`\n\n[第 ${readerPosition.page} 页]\n`;
+    if(notes.value.length-(notes.selectionEnd-notes.selectionStart)+marker.length>100000){toast('笔记已达到长度限制');return;}
+    notes.setRangeText(marker,notes.selectionStart,notes.selectionEnd,'end');notes.dispatchEvent(new Event('input',{bubbles:true}));notes.focus();
+  };
   form.addEventListener('invalid',event=>{if($('metadataPanel').contains(event.target))showDetailTab('metadata');},true);
   if($('purgeSingle'))$('purgeSingle').onclick=()=>openPurge(false,{id:p.id,revision:editRevision});
   $('recognize').onclick=()=>recognizePaper(p,form,editRevision);
@@ -457,3 +483,24 @@ $('applyBatchMetadata').onclick=async()=>{
   }catch(error){$('batchMetadataError').textContent=error.message;$('batchMetadataError').hidden=false;}
   finally{saving=false;editorEnabled(true);checkboxes.forEach(e=>e.disabled=false);$('closeBatchMetadata').disabled=false;refreshMetadataApply();renderList();}
 };
+
+window.addEventListener('message',event=>{
+  const frame=$('paperFrame');if(!frame||event.origin!==location.origin||event.source!==frame.contentWindow)return;
+  const message=event.data;if(!message||message.id!==selected)return;
+  if(message.type==='reader-save'){if(!saving&&!document.querySelector('dialog[open]'))$('edit')?.requestSubmit();return;}
+  if(message.type==='reader-exit-wide'){if(readerWide){setReaderWide(false);$('wideReader')?.focus();}return;}
+  const key='paperdesk-reading:'+draftPrefix+selected;
+  if(message.type==='reader-ready'){
+    let progress=null;try{progress=JSON.parse(localStorage.getItem(key)||'null');}catch{}
+    frame.contentWindow.postMessage({type:'reader-init',id:selected,progress},location.origin);return;
+  }
+  if(message.type==='reader-busy'||message.type==='reader-error'){
+    readerPosition=null;if($('insertPageNote'))$('insertPageNote').disabled=true;
+    if($('readingPosition'))$('readingPosition').textContent=message.type==='reader-error'?'PDF 暂不可读，可使用“打开 PDF”':'正在读取 PDF…';return;
+  }
+  if(message.type!=='reader-progress'||!Number.isSafeInteger(message.page)||!Number.isSafeInteger(message.total)||message.page<1||message.page>message.total||!['width','0.5','0.75','1','1.25','1.5','2'].includes(message.zoom))return;
+  readerPosition={id:selected,page:message.page,total:message.total,zoom:message.zoom};
+  let stored=true;try{localStorage.setItem(key,JSON.stringify({page:message.page,zoom:message.zoom}));}catch{stored=false;}
+  if($('readingPosition'))$('readingPosition').textContent=`第 ${message.page} / ${message.total} 页${stored?' · 本浏览器已记住位置':' · 浏览器无法保存位置'}`;
+  if($('insertPageNote'))$('insertPageNote').disabled=saving;
+});
