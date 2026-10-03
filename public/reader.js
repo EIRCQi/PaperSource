@@ -1,19 +1,52 @@
+import {PageSearch} from './reader-search.mjs';
 const $=id=>document.getElementById(id),params=new URLSearchParams(location.search);
 const id=params.get('id'),token=params.get('token');
 const zooms=new Set(['width','0.5','0.75','1','1.25','1.5','2']);
 let pdf,loadingTask,renderTask,textTask,lib,current=1,zoom='width',generation=0,started=false;
 const notify=(type,details={})=>parent.postMessage({type,id,...details},location.origin);
+const search=new PageSearch(document);
+let ready=false,displayedPage=0,displayedZoom='width',pageScroll={x:0,y:0},selectedText='',excerptPending=false,pendingPosition=null;
+const fraction=value=>Number.isFinite(value)?Math.min(1,Math.max(0,value)):0;
+function publishProgress(){if(ready)notify('reader-progress',{page:displayedPage,total:pdf.numPages,zoom:displayedZoom,scrollX:pageScroll.x,scrollY:pageScroll.y});}
+function selectionChanged(){
+  selectedText='';const selection=window.getSelection(),layer=$('sheet').querySelector('.textLayer');
+  if(ready&&layer&&selection?.rangeCount&&!selection.isCollapsed){
+    const range=selection.getRangeAt(0);
+    if(layer.contains(range.startContainer)&&layer.contains(range.endContainer))selectedText=selection.toString();
+  }
+  $('excerpt').disabled=parent===window||excerptPending||!selectedText.trim()||selectedText.length>10000;
+}
+function toolMessage(message){$('toolStatus').textContent=message;$('toolStatus').hidden=!message;}
+$('viewport').addEventListener('scroll',()=>{
+  if(!ready)return;
+  const view=$('viewport');
+  pageScroll={x:view.scrollWidth>view.clientWidth?view.scrollLeft/(view.scrollWidth-view.clientWidth):0,y:view.scrollHeight>view.clientHeight?view.scrollTop/(view.scrollHeight-view.clientHeight):0};
+  publishProgress();
+});
+document.addEventListener('selectionchange',selectionChanged);
+$('excerpt').addEventListener('pointerdown',event=>event.preventDefault());
+$('excerpt').onclick=()=>{
+  if(!ready||excerptPending||!selectedText.trim()||selectedText.length>10000)return;
+  excerptPending=true;$('excerpt').disabled=true;
+  notify('reader-excerpt',{page:displayedPage,text:selectedText});
+};
 function controls(){
   $('pageNumber').disabled=$('zoom').disabled=!pdf;
   $('previous').disabled=!pdf||current<=1;$('next').disabled=!pdf||current>=pdf.numPages;
   $('pageNumber').value=current;if(pdf){$('pageNumber').max=pdf.numPages;$('pageTotal').textContent=pdf.numPages;}
 }
 function showError(message){
+  ready=false;search.clear();selectedText='';$('excerpt').disabled=true;$('sheet').hidden=true;
   $('status').textContent='无法完成 PDF 阅读';$('error').textContent=message+' 可以使用主界面右上角“打开 PDF ↗”继续阅读。';$('error').hidden=false;
   notify('reader-error');
 }
-async function render(){
-  if(!pdf)return;const version=++generation;renderTask?.cancel();textTask?.cancel();
+async function render(restore){
+  if(!pdf)return;
+  publishProgress();
+  const position=restore||(!ready&&pendingPosition?.page===current?pendingPosition.position:displayedPage===current?{...pageScroll}:{x:0,y:0});
+  pendingPosition={page:current,position};
+  ready=false;search.clear();selectedText='';$('excerpt').disabled=true;toolMessage('');
+  const version=++generation;renderTask?.cancel();textTask?.cancel();
   notify('reader-busy');$('status').textContent=`正在渲染第 ${current} 页…`;$('error').hidden=true;controls();
   try{
     const page=await pdf.getPage(current);if(version!==generation)return;
@@ -29,16 +62,21 @@ async function render(){
     const layer=document.createElement('div');layer.className='textLayer';layer.style.setProperty('--total-scale-factor',scale);
     renderTask=page.render({canvasContext:canvas.getContext('2d'),viewport,transform:[pixels,0,0,pixels,0,0]});
     await renderTask.promise;if(version!==generation)return;
-    const content=await page.getTextContent();if(version!==generation)return;
-    textTask=new lib.TextLayer({textContentSource:content,container:layer,viewport});
-    // Attach before text layout for accurate font measurements.
-    const sheet=$('sheet');sheet.style.width=viewport.width+'px';sheet.style.height=viewport.height+'px';sheet.style.setProperty('--total-scale-factor',scale);sheet.replaceChildren(canvas,layer);
-    let textWarning=false;
-    try{await textTask.render();}catch(error){if(error.name!=='AbortException')textWarning=true;}
+    let textWarning=false,content;
+    try{content=await page.getTextContent();}catch{textWarning=true;}
     if(version!==generation)return;
-    $('viewport').scrollTop=0;$('viewport').scrollLeft=0;
+    if(content)textTask=new lib.TextLayer({textContentSource:content,container:layer,viewport});
+    // Attach before text layout for accurate font measurements.
+    const sheet=$('sheet');sheet.style.width=viewport.width+'px';sheet.style.height=viewport.height+'px';sheet.style.setProperty('--total-scale-factor',scale);sheet.hidden=false;const marks=document.createElement('div');marks.id='searchMarks';marks.setAttribute('aria-hidden','true');sheet.replaceChildren(canvas,layer,marks);
+    try{if(content)await textTask.render();}catch(error){if(error.name!=='AbortException')textWarning=true;}
+    if(version!==generation)return;
+    const view=$('viewport');
+    view.scrollTop=fraction(position.y)*Math.max(0,view.scrollHeight-view.clientHeight);
+    view.scrollLeft=fraction(position.x)*Math.max(0,view.scrollWidth-view.clientWidth);
+    pageScroll={x:fraction(position.x),y:fraction(position.y)};displayedPage=current;displayedZoom=zoom;ready=true;pendingPosition=null;
+    search.setLayer(layer);selectionChanged();
     $('status').textContent=`第 ${current} / ${pdf.numPages} 页 · ${Math.round(scale*100)}%${textWarning?' · 本页文字选择不可用':''}`;
-    notify('reader-progress',{page:current,total:pdf.numPages,zoom});
+    publishProgress();
   }catch(error){if(version!==generation||['RenderingCancelledException','AbortException'].includes(error.name))return;showError('本页解析失败，请尝试其他页或在浏览器中打开 PDF。');}
 }
 async function start(progress){
@@ -49,11 +87,15 @@ async function start(progress){
     loadingTask=lib.getDocument({url:`/api/papers/${id}/file`,httpHeaders:{'X-PaperDesk-Token':token},isEvalSupported:false,useWasm:false,wasmUrl:'/pdf-assets/wasm/',enableXfa:false,verbosity:0,cMapUrl:'/pdf-assets/cmaps/',cMapPacked:true,standardFontDataUrl:'/pdf-assets/standard_fonts/'});
     pdf=await loadingTask.promise;
     current=Number.isSafeInteger(progress?.page)?Math.max(1,Math.min(pdf.numPages,progress.page)):1;
-    zoom=zooms.has(progress?.zoom)?progress.zoom:'width';$('zoom').value=zoom;controls();await render();
+    zoom=zooms.has(progress?.zoom)?progress.zoom:'width';$('zoom').value=zoom;controls();await render({x:fraction(progress?.scrollX),y:fraction(progress?.scrollY)});
   }catch(error){showError(error.name==='PasswordException'?'PDF 受密码保护，请使用浏览器阅读器输入密码。':'PDF 或阅读器组件无法载入。请检查文件是否损坏，以及是否已运行 npm ci 安装依赖。');}
 }
 window.addEventListener('message',event=>{
   if(event.origin!==location.origin||event.source!==parent||event.data?.id!==id)return;
+  if(event.data.type==='reader-excerpt-result'){
+    excerptPending=false;toolMessage(event.data.message);
+    if(event.data.ok)window.getSelection()?.removeAllRanges();selectionChanged();
+  }
   if(event.data.type==='reader-init')void start(event.data.progress);
   if(event.data.type==='reader-jump'&&pdf&&Number.isSafeInteger(event.data.page)&&event.data.page>=1&&event.data.page<=pdf.numPages){current=event.data.page;void render();}
 });
@@ -64,6 +106,7 @@ $('fullscreen').onclick=async()=>{
 };
 document.addEventListener('fullscreenchange',()=>{$('fullscreen').textContent=document.fullscreenElement?'退出全屏':'全屏 PDF';});
 document.addEventListener('keydown',event=>{
+  if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='f'){event.preventDefault();search.focus();return;}
   if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='s'&&parent!==window){event.preventDefault();notify('reader-save');return;}
   if(event.key==='Escape'&&!document.fullscreenElement){notify('reader-exit-wide');return;}
   if(event.target.closest('input,select,textarea,button')||event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
@@ -76,7 +119,7 @@ function jump(){if(!pdf)return;const value=Number($('pageNumber').value);if(Numb
 $('pageNumber').onchange=jump;$('pageNumber').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();jump();}};
 $('zoom').onchange=()=>{zoom=$('zoom').value;void render();};
 let resizeTimer,lastWidth=0;new ResizeObserver(()=>{const width=$('viewport').clientWidth;if(!width||width===lastWidth)return;lastWidth=width;clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(pdf&&zoom==='width')void render();},120);}).observe($('viewport'));
-window.addEventListener('pagehide',()=>{generation++;clearTimeout(resizeTimer);renderTask?.cancel();textTask?.cancel();void loadingTask?.destroy();});
+window.addEventListener('pagehide',()=>{publishProgress();generation++;clearTimeout(resizeTimer);renderTask?.cancel();textTask?.cancel();void loadingTask?.destroy();});
 notify('reader-ready');
 // A standalone reader URL still works without the parent application.
 if(parent===window)void start(null);

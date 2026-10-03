@@ -49,7 +49,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.headers.host!==new URL(origin).host)fail(403,'访问地址不受支持');
     if(req.headers.origin && req.headers.origin!==origin)fail(403,'不允许跨站访问');
     const url=new URL(req.url,origin);
-    if(req.method==='GET'&&['/','/app.js','/style.css','/classify.mjs','/metadata-batch.mjs','/reader.html','/reader.js','/reader.css','/notes.mjs'].includes(url.pathname)){
+    if(req.method==='GET'&&['/','/app.js','/style.css','/classify.mjs','/metadata-batch.mjs','/reader.html','/reader.js','/reader.css','/notes.mjs','/reader-search.mjs'].includes(url.pathname)){
       const f=url.pathname==='/'?'index.html':url.pathname.slice(1);
       let bytes=fs.readFileSync(['classify.mjs','metadata-batch.mjs'].includes(f)?path.join(root,'lib',f):path.join(root,'public',f));
       if(f==='index.html')bytes=Buffer.from(bytes.toString().replace('__TOKEN__',token));

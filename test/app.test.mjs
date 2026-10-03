@@ -273,7 +273,7 @@ test('内置阅读器资源可读取，PDF 访问仍需令牌且资源路径受�
   const dir=await mkdtemp(join(tmpdir(),'paperdesk-viewer-'));let app;
   try{
     app=await start(dir);
-    for(const file of ['/reader.html','/reader.js','/reader.css','/notes.mjs','/pdf-assets/pdf.mjs','/pdf-assets/pdf.worker.mjs','/pdf-assets/viewer.css','/pdf-assets/wasm/openjpeg_nowasm_fallback.js','/pdf-assets/wasm/jbig2_nowasm_fallback.js','/pdf-assets/cmaps/UniGB-UCS2-H.bcmap','/pdf-assets/standard_fonts/LiberationSans-Regular.ttf']){
+    for(const file of ['/reader.html','/reader.js','/reader.css','/reader-search.mjs','/notes.mjs','/pdf-assets/pdf.mjs','/pdf-assets/pdf.worker.mjs','/pdf-assets/viewer.css','/pdf-assets/wasm/openjpeg_nowasm_fallback.js','/pdf-assets/wasm/jbig2_nowasm_fallback.js','/pdf-assets/cmaps/UniGB-UCS2-H.bcmap','/pdf-assets/standard_fonts/LiberationSans-Regular.ttf']){
       const r=await fetch(app.base+file);assert.equal(r.status,200,file);assert.ok((await r.arrayBuffer()).byteLength>0);
     }
     assert.match((await fetch(app.base+'/reader.html')).headers.get('content-security-policy'),/worker-src 'self'/);
